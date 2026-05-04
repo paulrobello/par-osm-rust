@@ -77,7 +77,7 @@ impl OsmData {
         self.nodes.extend(other.nodes);
         let offset = self.ways.len();
         self.ways.extend(other.ways);
-        // Adjust indices from  to account for the ways already in .
+        // Adjust indices from `other` to account for the ways already in `self`.
         self.ways_by_id.extend(
             other
                 .ways_by_id
