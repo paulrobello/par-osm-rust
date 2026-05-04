@@ -2,6 +2,7 @@
 //! Overpass API integration: QL query builder and HTTP fetch.
 
 use anyhow::{Result, bail};
+use url::Url;
 
 use crate::filter::FeatureFilter;
 use crate::osm::OsmData;
@@ -22,31 +23,27 @@ const ALLOWED_OVERPASS_HOSTS: &[&str] = &[
 /// Validate that `url` is a safe Overpass endpoint.
 ///
 /// Rejects any URL that:
-/// - does not start with `https://`, or
+/// - does not use HTTPS,
+/// - includes userinfo, or
 /// - whose host is not in `ALLOWED_OVERPASS_HOSTS`.
-///
-/// The host is extracted as the portion between `https://` and the first `/`,
-/// `?`, or `#` (or end of string). Port suffixes (`:8080`) are stripped before
-/// the allowlist check so that non-standard ports on approved hosts are also
-/// permitted.
 ///
 /// Returns `Ok(())` if the URL is acceptable, or an error with a descriptive
 /// message otherwise.
 pub fn validate_overpass_url(url: &str) -> Result<()> {
-    // Scheme check — must be https.
-    let rest = url
-        .strip_prefix("https://")
-        .ok_or_else(|| anyhow::anyhow!("Overpass URL must use HTTPS (got: '{url}')"))?;
+    let parsed =
+        Url::parse(url).map_err(|err| anyhow::anyhow!("Invalid Overpass URL '{url}': {err}"))?;
 
-    // Extract host (up to the first '/', '?', '#', or end of string).
-    let host_and_port = rest.split(&['/', '?', '#']).next().unwrap_or(rest);
-
-    // Strip optional port (":8080").
-    let host = host_and_port.split(':').next().unwrap_or(host_and_port);
-
-    if host.is_empty() {
-        bail!("Overpass URL has no host");
+    if parsed.scheme() != "https" {
+        bail!("Overpass URL must use HTTPS (got: '{url}')");
     }
+
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        bail!("Overpass URL must not include userinfo");
+    }
+
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("Overpass URL has no host"))?;
 
     if !ALLOWED_OVERPASS_HOSTS.contains(&host) {
         bail!(
@@ -338,6 +335,23 @@ mod tests {
         assert!(
             validate_overpass_url("https://overpass-api.de:443/api/interpreter").is_ok(),
             "explicit port on approved host should be allowed"
+        );
+    }
+
+    #[test]
+    fn url_with_allowed_host_in_userinfo_and_evil_host_is_rejected() {
+        assert!(
+            validate_overpass_url("https://overpass-api.de:443@evil.example.com/api/interpreter")
+                .is_err(),
+            "allowed host embedded in userinfo must be rejected"
+        );
+    }
+
+    #[test]
+    fn url_with_userinfo_on_allowed_host_is_rejected() {
+        assert!(
+            validate_overpass_url("https://user:pass@overpass-api.de/api/interpreter").is_err(),
+            "userinfo must be rejected even when host is approved"
         );
     }
 }

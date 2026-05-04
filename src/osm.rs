@@ -54,8 +54,9 @@ pub struct OsmData {
     pub ways: Vec<OsmWay>,
     /// Way lookup by ID for relation member resolution.
     ///
-    /// Maps OSM way ID → index into .  Using an index rather than a
-    /// cloned  halves peak memory for the ways collection.
+    /// Maps each OSM way ID to its position in the `ways` vector. Storing an
+    /// index avoids duplicating `OsmWay` values while still allowing relation
+    /// members to find their referenced ways efficiently.
     pub ways_by_id: HashMap<i64, usize>,
     /// Multipolygon relations.
     pub relations: Vec<OsmRelation>,
