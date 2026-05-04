@@ -19,30 +19,8 @@ const BASE_URL: &str = "https://s3.amazonaws.com/elevation-tiles-prod/skadi";
 // ── Cache directory ─────────────────────────────────────────────────────────
 
 /// Return the persistent SRTM tile cache directory, creating it if needed.
-///
-/// Priority:
-/// 1. `SRTM_CACHE_DIR` environment variable (override for servers / CI)
-/// 2. `$HOME/.cache/osm-to-bedrock/srtm` (Linux / macOS XDG-style)
-/// 3. `%LOCALAPPDATA%\osm-to-bedrock\srtm` (Windows)
-/// 4. `<system-temp>/osm-to-bedrock-srtm` (fallback)
 pub fn cache_dir() -> PathBuf {
-    let dir = if let Ok(v) = std::env::var("SRTM_CACHE_DIR") {
-        PathBuf::from(v)
-    } else if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home)
-            .join(".cache")
-            .join("osm-to-bedrock")
-            .join("srtm")
-    } else if let Ok(local) = std::env::var("LOCALAPPDATA") {
-        PathBuf::from(local).join("osm-to-bedrock").join("srtm")
-    } else {
-        std::env::temp_dir().join("osm-to-bedrock-srtm")
-    };
-
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        log::warn!("Could not create SRTM cache dir {}: {e}", dir.display());
-    }
-    dir
+    crate::cache::srtm_cache_dir()
 }
 
 // ── Tile utilities ─────────────────────────────────────────────────────────

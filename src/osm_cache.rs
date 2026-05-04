@@ -1,6 +1,6 @@
 //! Disk cache for raw Overpass XML responses.
 //!
-//! Layout: `~/.cache/osm-to-bedrock/overpass/{sha256}.xml` + `{sha256}.meta.json`
+//! Layout: shared Overpass cache directory with `{sha256}.xml` + `{sha256}.meta.json`.
 //! Key:    SHA-256 of `"{s:.4},{w:.4},{n:.4},{e:.4}|roads={},buildings={},water={},landuse={},railways={}"`
 
 use anyhow::Result;
@@ -35,30 +35,8 @@ struct CacheMeta {
 // ── Cache directory ────────────────────────────────────────────────────────
 
 /// Return the persistent Overpass XML cache directory, creating it if needed.
-///
-/// Priority:
-/// 1. `OVERPASS_CACHE_DIR` environment variable (override for servers / CI)
-/// 2. `$HOME/.cache/osm-to-bedrock/overpass` (Linux / macOS XDG-style)
-/// 3. `%LOCALAPPDATA%\osm-to-bedrock\overpass` (Windows)
-/// 4. `<system-temp>/osm-to-bedrock-overpass` (fallback)
 pub fn cache_dir() -> PathBuf {
-    let dir = if let Ok(override_dir) = std::env::var("OVERPASS_CACHE_DIR") {
-        PathBuf::from(override_dir)
-    } else if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home)
-            .join(".cache")
-            .join("osm-to-bedrock")
-            .join("overpass")
-    } else if let Ok(local) = std::env::var("LOCALAPPDATA") {
-        PathBuf::from(local).join("osm-to-bedrock").join("overpass")
-    } else {
-        std::env::temp_dir().join("osm-to-bedrock-overpass")
-    };
-
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        log::warn!("Could not create Overpass cache dir {}: {e}", dir.display());
-    }
-    dir
+    crate::cache::overpass_cache_dir()
 }
 
 // ── Cache key ──────────────────────────────────────────────────────────────
