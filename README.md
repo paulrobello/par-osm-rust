@@ -34,3 +34,15 @@ cargo check --all-targets
 cargo clippy --all-targets -- -D warnings
 cargo test
 ```
+
+## Cache migration API
+
+Consumers can explicitly migrate legacy osm-to-bedrock caches before starting their own work:
+
+```rust
+let report = par_osm_rust::cache::migrate_legacy_caches()?;
+println!("migrated overpass files: {}", report.overpass.moved_files + report.overpass.copied_files);
+println!("migrated srtm files: {}", report.srtm.moved_files + report.srtm.copied_files);
+```
+
+The regular `par_osm_rust::osm_cache::cache_dir()` and `par_osm_rust::srtm::cache_dir()` helpers also attempt default-location legacy migration on first use.
