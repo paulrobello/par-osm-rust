@@ -7,9 +7,15 @@ use crate::overture::OvertureParams;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PoiSourceMode {
+    /// Use OSM POIs only.
     OsmOnly,
+    /// Use Overture POIs only; OSM POIs are cleared when Overture is unavailable.
     OvertureOnly,
+    /// Merge OSM and Overture POIs, deduping near duplicates and preferring Overture
+    /// representatives for duplicate groups.
     Both,
+    /// Prefer Overture POIs, with OSM POIs as fallback when Overture is missing or
+    /// returns no POIs.
     OverturePreferred,
 }
 
@@ -194,7 +200,7 @@ pub fn merge_source_data(
             }
         }
         (PoiSourceMode::OverturePreferred, Some(mut overture)) => {
-            warnings.push("Overture POIs unavailable; using OSM POIs only".to_string());
+            warnings.push("Overture returned no POIs; using OSM POIs only".to_string());
             overture.poi_nodes.clear();
             osm_data.merge(overture);
             osm_data.poi_nodes = original_osm_pois;
@@ -253,7 +259,7 @@ mod tests {
     }
 
     #[test]
-    fn osm_only_keeps_osm_pois() {
+    fn osm_only_keeps_osm_pois_and_reports_osm_only_status() {
         let mut osm = empty_data();
         osm.poi_nodes.push(poi(
             0.0,
@@ -275,6 +281,7 @@ mod tests {
 
         let merged = merge_source_data(osm, Some(overture), PoiSourceMode::OsmOnly);
 
+        assert_eq!(merged.status, SourceStatus::OsmOnly);
         assert_eq!(merged.data.poi_nodes.len(), 1);
         assert_eq!(merged.data.poi_nodes[0].source, FeatureSource::Osm);
     }
@@ -307,7 +314,97 @@ mod tests {
     }
 
     #[test]
-    fn overture_preferred_dedupes_named_pois_with_overture_winning() {
+    fn overture_only_without_overture_clears_osm_pois_and_warns() {
+        let mut osm = empty_data();
+        osm.poi_nodes.push(poi(
+            0.0,
+            0.0,
+            "shop",
+            "bakery",
+            "Bakery",
+            FeatureSource::Osm,
+        ));
+
+        let merged = merge_source_data(osm, None, PoiSourceMode::OvertureOnly);
+
+        assert_eq!(merged.status, SourceStatus::OvertureOnly);
+        assert!(merged.data.poi_nodes.is_empty());
+        assert_eq!(
+            merged.warnings,
+            vec!["Overture POIs unavailable for overture-only mode".to_string()]
+        );
+    }
+
+    #[test]
+    fn both_dedupes_duplicate_pois_with_overture_winning_and_reports_both_status() {
+        let mut osm = empty_data();
+        osm.poi_nodes.push(poi(
+            51.50000,
+            -0.10000,
+            "amenity",
+            "restaurant",
+            "Diner",
+            FeatureSource::Osm,
+        ));
+        let mut overture = empty_data();
+        overture.poi_nodes.push(poi(
+            51.50005,
+            -0.10005,
+            "amenity",
+            "restaurant",
+            "Diner",
+            FeatureSource::Overture,
+        ));
+
+        let merged = merge_source_data(osm, Some(overture), PoiSourceMode::Both);
+
+        assert_eq!(merged.status, SourceStatus::Both);
+        assert_eq!(merged.data.poi_nodes.len(), 1);
+        assert_eq!(merged.data.poi_nodes[0].source, FeatureSource::Overture);
+    }
+
+    #[test]
+    fn same_name_with_category_mismatch_keeps_both_pois() {
+        let mut osm = empty_data();
+        osm.poi_nodes.push(poi(
+            51.50000,
+            -0.10000,
+            "amenity",
+            "restaurant",
+            "Corner",
+            FeatureSource::Osm,
+        ));
+        let mut overture = empty_data();
+        overture.poi_nodes.push(poi(
+            51.50005,
+            -0.10005,
+            "shop",
+            "bakery",
+            "Corner",
+            FeatureSource::Overture,
+        ));
+
+        let merged = merge_source_data(osm, Some(overture), PoiSourceMode::Both);
+
+        assert_eq!(merged.data.poi_nodes.len(), 2);
+        assert!(
+            merged
+                .data
+                .poi_nodes
+                .iter()
+                .any(|poi| poi.source == FeatureSource::Osm)
+        );
+        assert!(
+            merged
+                .data
+                .poi_nodes
+                .iter()
+                .any(|poi| poi.source == FeatureSource::Overture)
+        );
+    }
+
+    #[test]
+    fn overture_preferred_dedupes_named_pois_with_overture_winning_and_reports_success() {
         let mut osm = empty_data();
         osm.poi_nodes.push(poi(
             51.50000,
@@ -329,6 +426,7 @@ mod tests {
 
         let merged = merge_source_data(osm, Some(overture), PoiSourceMode::OverturePreferred);
 
+        assert_eq!(merged.status, SourceStatus::OverturePreferred);
         assert_eq!(merged.data.poi_nodes.len(), 1);
         assert_eq!(merged.data.poi_nodes[0].source, FeatureSource::Overture);
     }
@@ -347,6 +445,7 @@ mod tests {
 
         let merged = merge_source_data(osm, None, PoiSourceMode::OverturePreferred);
 
+        assert_eq!(merged.status, SourceStatus::OvertureFallbackToOsm);
         assert_eq!(merged.data.poi_nodes.len(), 1);
         assert_eq!(merged.data.poi_nodes[0].source, FeatureSource::Osm);
         assert!(
@@ -355,5 +454,55 @@ mod tests {
                 .iter()
                 .any(|warning| warning.contains("Overture POIs unavailable"))
         );
+    }
+
+    #[test]
+    fn overture_preferred_falls_back_precisely_when_overture_returns_zero_pois() {
+        let mut osm = empty_data();
+        osm.poi_nodes.push(poi(
+            0.0,
+            0.0,
+            "shop",
+            "bakery",
+            "Bakery",
+            FeatureSource::Osm,
+        ));
+        let overture = empty_data();
+
+        let merged = merge_source_data(osm, Some(overture), PoiSourceMode::OverturePreferred);
+
+        assert_eq!(merged.status, SourceStatus::OvertureFallbackToOsm);
+        assert_eq!(merged.data.poi_nodes.len(), 1);
+        assert_eq!(merged.data.poi_nodes[0].source, FeatureSource::Osm);
+        assert_eq!(
+            merged.warnings,
+            vec!["Overture returned no POIs; using OSM POIs only".to_string()]
+        );
+    }
+
+    #[test]
+    fn non_poi_overture_tree_nodes_are_preserved_when_pois_are_filtered() {
+        let mut osm = empty_data();
+        osm.poi_nodes.push(poi(
+            0.0,
+            0.0,
+            "shop",
+            "bakery",
+            "Bakery",
+            FeatureSource::Osm,
+        ));
+        let mut overture = empty_data();
+        overture.tree_nodes.push(crate::osm::OsmNode {
+            lat: 51.5,
+            lon: -0.1,
+        });
+
+        let merged = merge_source_data(osm, Some(overture), PoiSourceMode::OverturePreferred);
+
+        assert_eq!(merged.status, SourceStatus::OvertureFallbackToOsm);
+        assert_eq!(merged.data.poi_nodes.len(), 1);
+        assert_eq!(merged.data.tree_nodes.len(), 1);
+        assert_eq!(merged.data.tree_nodes[0].lat, 51.5);
+        assert_eq!(merged.data.tree_nodes[0].lon, -0.1);
     }
 }
