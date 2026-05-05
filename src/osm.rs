@@ -16,6 +16,16 @@ pub struct OsmNode {
     pub lon: f64,
 }
 
+/// Data source for normalized map features.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FeatureSource {
+    #[default]
+    Osm,
+    Overture,
+    Synthetic,
+}
+
 /// An OSM node that carries feature tags (amenity, shop, tourism, etc.).
 /// Used for POI marker placement.
 #[derive(Debug, Clone)]
@@ -23,6 +33,7 @@ pub struct OsmPoiNode {
     pub lat: f64,
     pub lon: f64,
     pub tags: HashMap<String, String>,
+    pub source: FeatureSource,
 }
 
 /// An OSM way: an ordered sequence of node references with tags.
@@ -212,6 +223,7 @@ pub fn parse_pbf(path: &Path) -> Result<OsmData> {
                         lat,
                         lon,
                         tags: tags.clone(),
+                        source: FeatureSource::Osm,
                     });
                 }
                 if tags.contains_key("addr:housenumber") {
@@ -219,6 +231,7 @@ pub fn parse_pbf(path: &Path) -> Result<OsmData> {
                         lat,
                         lon,
                         tags: tags.clone(),
+                        source: FeatureSource::Osm,
                     });
                 }
                 if tags.get("natural").map(|s| s.as_str()) == Some("tree") {
@@ -247,6 +260,7 @@ pub fn parse_pbf(path: &Path) -> Result<OsmData> {
                         lat,
                         lon,
                         tags: tags.clone(),
+                        source: FeatureSource::Osm,
                     });
                 }
                 if tags.contains_key("addr:housenumber") {
@@ -254,6 +268,7 @@ pub fn parse_pbf(path: &Path) -> Result<OsmData> {
                         lat,
                         lon,
                         tags: tags.clone(),
+                        source: FeatureSource::Osm,
                     });
                 }
                 if tags.get("natural").map(|s| s.as_str()) == Some("tree") {
@@ -455,6 +470,7 @@ pub fn parse_osm_xml_str(xml: &str) -> Result<OsmData> {
                         lat: cur_lat,
                         lon: cur_lon,
                         tags: cur_node_tags.clone(),
+                        source: FeatureSource::Osm,
                     });
                 }
                 if cur_node_tags.contains_key("addr:housenumber") {
@@ -462,6 +478,7 @@ pub fn parse_osm_xml_str(xml: &str) -> Result<OsmData> {
                         lat: cur_lat,
                         lon: cur_lon,
                         tags: cur_node_tags.clone(),
+                        source: FeatureSource::Osm,
                     });
                 }
                 if cur_node_tags.get("natural").map(|s| s.as_str()) == Some("tree") {
@@ -756,6 +773,38 @@ mod tests {
         assert_eq!(data.poi_nodes[0].tags["amenity"], "restaurant");
         assert_eq!(data.poi_nodes[0].tags["name"], "The Pub");
         assert_eq!(data.poi_nodes[1].tags["shop"], "supermarket");
+    }
+
+    #[test]
+    fn parse_xml_poi_nodes_are_marked_osm_source() {
+        let xml = r#"<?xml version="1.0"?>
+<osm version="0.6">
+  <node id="1" lat="51.5" lon="-0.1">
+    <tag k="amenity" v="restaurant"/>
+    <tag k="name" v="The Pub"/>
+  </node>
+</osm>"#;
+
+        let data = parse_osm_xml_str(xml).unwrap();
+
+        assert_eq!(data.poi_nodes.len(), 1);
+        assert_eq!(data.poi_nodes[0].source, FeatureSource::Osm);
+    }
+
+    #[test]
+    fn parse_xml_address_nodes_are_marked_osm_source() {
+        let xml = r#"<?xml version="1.0"?>
+<osm version="0.6">
+  <node id="1" lat="51.5" lon="-0.1">
+    <tag k="addr:housenumber" v="42"/>
+    <tag k="addr:street" v="Baker Street"/>
+  </node>
+</osm>"#;
+
+        let data = parse_osm_xml_str(xml).unwrap();
+
+        assert_eq!(data.addr_nodes.len(), 1);
+        assert_eq!(data.addr_nodes[0].source, FeatureSource::Osm);
     }
 
     #[test]
