@@ -6,7 +6,8 @@ use anyhow::{Context, Result};
 use osmpbf::{Element, ElementReader};
 use quick_xml::Reader;
 use quick_xml::events::Event;
-use std::collections::HashMap;
+use quick_xml::events::attributes::Attribute;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 /// A geographic point from the OSM dataset.
@@ -180,6 +181,20 @@ impl OsmData {
         // Update bounds to the requested bbox
         self.bounds = Some(bbox);
     }
+}
+
+fn xml_attr_value(attr: &Attribute<'_>) -> String {
+    attr.unescape_value()
+        .map(|value| value.into_owned())
+        .unwrap_or_else(|_| {
+            std::str::from_utf8(attr.value.as_ref())
+                .unwrap_or("")
+                .to_string()
+        })
+}
+
+fn xml_attr_parse<T: std::str::FromStr>(attr: &Attribute<'_>) -> Option<T> {
+    xml_attr_value(attr).parse().ok()
 }
 
 /// Parse a `.osm.pbf` file and return all nodes and ways.
@@ -360,6 +375,7 @@ pub fn parse_osm_xml_str(xml: &str) -> Result<OsmData> {
     let mut min_lon = f64::MAX;
     let mut max_lat = f64::MIN;
     let mut max_lon = f64::MIN;
+    let mut explicit_bounds: Option<(f64, f64, f64, f64)> = None;
 
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
@@ -372,6 +388,26 @@ pub fn parse_osm_xml_str(xml: &str) -> Result<OsmData> {
 
     loop {
         match reader.read_event() {
+            Ok(Event::Empty(ref e)) if e.name().as_ref() == b"bounds" => {
+                let mut minlat: Option<f64> = None;
+                let mut minlon: Option<f64> = None;
+                let mut maxlat: Option<f64> = None;
+                let mut maxlon: Option<f64> = None;
+                for attr in e.attributes().flatten() {
+                    match attr.key.as_ref() {
+                        b"minlat" => minlat = xml_attr_parse(&attr),
+                        b"minlon" => minlon = xml_attr_parse(&attr),
+                        b"maxlat" => maxlat = xml_attr_parse(&attr),
+                        b"maxlon" => maxlon = xml_attr_parse(&attr),
+                        _ => {}
+                    }
+                }
+                if let (Some(minlat), Some(minlon), Some(maxlat), Some(maxlon)) =
+                    (minlat, minlon, maxlat, maxlon)
+                {
+                    explicit_bounds = Some((minlat, minlon, maxlat, maxlon));
+                }
+            }
             // Self-closing node (no child tags)
             Ok(Event::Empty(ref e)) if e.name().as_ref() == b"node" => {
                 let mut id: Option<i64> = None;
@@ -379,21 +415,9 @@ pub fn parse_osm_xml_str(xml: &str) -> Result<OsmData> {
                 let mut lon: Option<f64> = None;
                 for attr in e.attributes().flatten() {
                     match attr.key.as_ref() {
-                        b"id" => {
-                            id = std::str::from_utf8(&attr.value)
-                                .ok()
-                                .and_then(|s| s.parse().ok())
-                        }
-                        b"lat" => {
-                            lat = std::str::from_utf8(&attr.value)
-                                .ok()
-                                .and_then(|s| s.parse().ok())
-                        }
-                        b"lon" => {
-                            lon = std::str::from_utf8(&attr.value)
-                                .ok()
-                                .and_then(|s| s.parse().ok())
-                        }
+                        b"id" => id = xml_attr_parse(&attr),
+                        b"lat" => lat = xml_attr_parse(&attr),
+                        b"lon" => lon = xml_attr_parse(&attr),
                         _ => {}
                     }
                 }
@@ -405,6 +429,26 @@ pub fn parse_osm_xml_str(xml: &str) -> Result<OsmData> {
                     nodes.insert(id, OsmNode { lat, lon });
                 }
             }
+            Ok(Event::Start(ref e)) if e.name().as_ref() == b"bounds" => {
+                let mut minlat: Option<f64> = None;
+                let mut minlon: Option<f64> = None;
+                let mut maxlat: Option<f64> = None;
+                let mut maxlon: Option<f64> = None;
+                for attr in e.attributes().flatten() {
+                    match attr.key.as_ref() {
+                        b"minlat" => minlat = xml_attr_parse(&attr),
+                        b"minlon" => minlon = xml_attr_parse(&attr),
+                        b"maxlat" => maxlat = xml_attr_parse(&attr),
+                        b"maxlon" => maxlon = xml_attr_parse(&attr),
+                        _ => {}
+                    }
+                }
+                if let (Some(minlat), Some(minlon), Some(maxlat), Some(maxlon)) =
+                    (minlat, minlon, maxlat, maxlon)
+                {
+                    explicit_bounds = Some((minlat, minlon, maxlat, maxlon));
+                }
+            }
             // Opening <node> tag with child <tag> elements
             Ok(Event::Start(ref e)) if e.name().as_ref() == b"node" => {
                 let mut id: Option<i64> = None;
@@ -412,21 +456,9 @@ pub fn parse_osm_xml_str(xml: &str) -> Result<OsmData> {
                 let mut lon: Option<f64> = None;
                 for attr in e.attributes().flatten() {
                     match attr.key.as_ref() {
-                        b"id" => {
-                            id = std::str::from_utf8(&attr.value)
-                                .ok()
-                                .and_then(|s| s.parse().ok())
-                        }
-                        b"lat" => {
-                            lat = std::str::from_utf8(&attr.value)
-                                .ok()
-                                .and_then(|s| s.parse().ok())
-                        }
-                        b"lon" => {
-                            lon = std::str::from_utf8(&attr.value)
-                                .ok()
-                                .and_then(|s| s.parse().ok())
-                        }
+                        b"id" => id = xml_attr_parse(&attr),
+                        b"lat" => lat = xml_attr_parse(&attr),
+                        b"lon" => lon = xml_attr_parse(&attr),
                         _ => {}
                     }
                 }
@@ -448,8 +480,8 @@ pub fn parse_osm_xml_str(xml: &str) -> Result<OsmData> {
                 let mut v = String::new();
                 for attr in e.attributes().flatten() {
                     match attr.key.as_ref() {
-                        b"k" => k = std::str::from_utf8(&attr.value).unwrap_or("").to_string(),
-                        b"v" => v = std::str::from_utf8(&attr.value).unwrap_or("").to_string(),
+                        b"k" => k = xml_attr_value(&attr),
+                        b"v" => v = xml_attr_value(&attr),
                         _ => {}
                     }
                 }
@@ -523,7 +555,7 @@ pub fn parse_osm_xml_str(xml: &str) -> Result<OsmData> {
                         .attributes()
                         .flatten()
                         .find(|a| a.key.as_ref() == b"id")
-                        .and_then(|a| std::str::from_utf8(&a.value).ok()?.parse().ok())
+                        .and_then(|a| xml_attr_parse(&a))
                         .unwrap_or(0);
                     current_tags.clear();
                     current_node_refs.clear();
@@ -541,7 +573,7 @@ pub fn parse_osm_xml_str(xml: &str) -> Result<OsmData> {
                         .attributes()
                         .flatten()
                         .find(|a| a.key.as_ref() == b"ref")
-                        .and_then(|a| std::str::from_utf8(&a.value).ok()?.parse::<i64>().ok())
+                        .and_then(|a| xml_attr_parse::<i64>(&a))
                     {
                         current_node_refs.push(r);
                     }
@@ -551,8 +583,8 @@ pub fn parse_osm_xml_str(xml: &str) -> Result<OsmData> {
                     let mut v = String::new();
                     for attr in e.attributes().flatten() {
                         match attr.key.as_ref() {
-                            b"k" => k = std::str::from_utf8(&attr.value).unwrap_or("").to_string(),
-                            b"v" => v = std::str::from_utf8(&attr.value).unwrap_or("").to_string(),
+                            b"k" => k = xml_attr_value(&attr),
+                            b"v" => v = xml_attr_value(&attr),
                             _ => {}
                         }
                     }
@@ -566,18 +598,9 @@ pub fn parse_osm_xml_str(xml: &str) -> Result<OsmData> {
                     let mut mrole = String::new();
                     for attr in e.attributes().flatten() {
                         match attr.key.as_ref() {
-                            b"type" => {
-                                mtype = std::str::from_utf8(&attr.value).unwrap_or("").to_string()
-                            }
-                            b"ref" => {
-                                mref = std::str::from_utf8(&attr.value)
-                                    .ok()
-                                    .and_then(|s| s.parse().ok())
-                                    .unwrap_or(0)
-                            }
-                            b"role" => {
-                                mrole = std::str::from_utf8(&attr.value).unwrap_or("").to_string()
-                            }
+                            b"type" => mtype = xml_attr_value(&attr),
+                            b"ref" => mref = xml_attr_parse(&attr).unwrap_or(0),
+                            b"role" => mrole = xml_attr_value(&attr),
                             _ => {}
                         }
                     }
@@ -619,11 +642,8 @@ pub fn parse_osm_xml_str(xml: &str) -> Result<OsmData> {
         }
     }
 
-    let bounds = if min_lat < f64::MAX {
-        Some((min_lat, min_lon, max_lat, max_lon))
-    } else {
-        None
-    };
+    let bounds = explicit_bounds
+        .or_else(|| (min_lat < f64::MAX).then_some((min_lat, min_lon, max_lat, max_lon)));
 
     log::info!(
         "Parsed {} nodes, {} ways, {} relations, {} POI nodes, {} address nodes, {} tree nodes (XML)",
@@ -687,6 +707,16 @@ fn write_tags(xml: &mut String, tags: &HashMap<String, String>) {
     }
 }
 
+fn next_synthetic_node_id(next_id: &mut i64, occupied: &mut HashSet<i64>) -> i64 {
+    while occupied.contains(next_id) {
+        *next_id -= 1;
+    }
+    let id = *next_id;
+    occupied.insert(id);
+    *next_id -= 1;
+    id
+}
+
 /// Serialize normalized [`OsmData`] into simple OSM XML that this crate and
 /// `osm-world` can parse again.
 pub fn write_osm_xml_string(data: &OsmData) -> String {
@@ -709,33 +739,34 @@ pub fn write_osm_xml_string(data: &OsmData) -> String {
         ));
     }
 
+    let mut occupied_node_ids: HashSet<i64> = data.nodes.keys().copied().collect();
     let mut synthetic_id = -9_000_000_000_i64;
     for poi in &data.poi_nodes {
+        let node_id = next_synthetic_node_id(&mut synthetic_id, &mut occupied_node_ids);
         xml.push_str(&format!(
             "  <node id=\"{}\" lat=\"{}\" lon=\"{}\">\n",
-            synthetic_id, poi.lat, poi.lon
+            node_id, poi.lat, poi.lon
         ));
         write_tags(&mut xml, &poi.tags);
         xml.push_str("  </node>\n");
-        synthetic_id -= 1;
     }
 
     for addr in &data.addr_nodes {
+        let node_id = next_synthetic_node_id(&mut synthetic_id, &mut occupied_node_ids);
         xml.push_str(&format!(
             "  <node id=\"{}\" lat=\"{}\" lon=\"{}\">\n",
-            synthetic_id, addr.lat, addr.lon
+            node_id, addr.lat, addr.lon
         ));
         write_tags(&mut xml, &addr.tags);
         xml.push_str("  </node>\n");
-        synthetic_id -= 1;
     }
 
     for tree in &data.tree_nodes {
+        let node_id = next_synthetic_node_id(&mut synthetic_id, &mut occupied_node_ids);
         xml.push_str(&format!(
             "  <node id=\"{}\" lat=\"{}\" lon=\"{}\">\n    <tag k=\"natural\" v=\"tree\"/>\n  </node>\n",
-            synthetic_id, tree.lat, tree.lon
+            node_id, tree.lat, tree.lon
         ));
-        synthetic_id -= 1;
     }
 
     for (idx, way) in data.ways.iter().enumerate() {
@@ -750,6 +781,20 @@ pub fn write_osm_xml_string(data: &OsmData) -> String {
         }
         write_tags(&mut xml, &way.tags);
         xml.push_str("  </way>\n");
+    }
+
+    for (idx, relation) in data.relations.iter().enumerate() {
+        let relation_id = -7_000_000_000_i64 - idx as i64;
+        xml.push_str(&format!("  <relation id=\"{}\">\n", relation_id));
+        for member in &relation.members {
+            xml.push_str(&format!(
+                "    <member type=\"way\" ref=\"{}\" role=\"{}\"/>\n",
+                member.way_id,
+                escape_xml_attr(&member.role)
+            ));
+        }
+        write_tags(&mut xml, &relation.tags);
+        xml.push_str("  </relation>\n");
     }
 
     xml.push_str("</osm>\n");
@@ -803,6 +848,19 @@ mod tests {
     }
 
     #[test]
+    fn parse_xml_preserves_explicit_bounds() {
+        let xml = r#"<?xml version="1.0"?>
+<osm version="0.6">
+  <bounds minlat="10.0" minlon="20.0" maxlat="30.0" maxlon="40.0"/>
+  <node id="1" lat="11.0" lon="21.0"/>
+</osm>"#;
+
+        let data = parse_osm_xml_str(xml).unwrap();
+
+        assert_eq!(data.bounds, Some((10.0, 20.0, 30.0, 40.0)));
+    }
+
+    #[test]
     fn parse_xml_nodes_after_ways() {
         // Overpass does not guarantee node-before-way ordering
         let xml = r#"<?xml version="1.0"?>
@@ -841,6 +899,36 @@ mod tests {
         assert_eq!(data.relations[0].members[0].way_id, 100);
         assert_eq!(data.relations[0].members[0].role, "outer");
         assert_eq!(data.relations[0].tags["landuse"], "park");
+    }
+
+    #[test]
+    fn parse_xml_unescapes_node_way_and_relation_tag_attributes() {
+        let xml = r#"<?xml version="1.0"?>
+<osm version="0.6">
+  <node id="1" lat="0.0" lon="0.0">
+    <tag k="amenity" v="cafe"/>
+    <tag k="name" v="A&amp;B"/>
+    <tag k="brand&amp;operator" v="C&amp;D"/>
+  </node>
+  <way id="100">
+    <nd ref="1"/>
+    <tag k="highway" v="residential"/>
+    <tag k="name&amp;operator" v="A&amp;B Road"/>
+  </way>
+  <relation id="200">
+    <member type="way" ref="100" role="outer&amp;ring"/>
+    <tag k="type" v="multipolygon"/>
+    <tag k="landuse&amp;name" v="A&amp;B Park"/>
+  </relation>
+</osm>"#;
+
+        let data = parse_osm_xml_str(xml).unwrap();
+
+        assert_eq!(data.poi_nodes[0].tags["name"], "A&B");
+        assert_eq!(data.poi_nodes[0].tags["brand&operator"], "C&D");
+        assert_eq!(data.ways[0].tags["name&operator"], "A&B Road");
+        assert_eq!(data.relations[0].members[0].role, "outer&ring");
+        assert_eq!(data.relations[0].tags["landuse&name"], "A&B Park");
     }
 
     #[test]
@@ -975,5 +1063,96 @@ mod tests {
             parsed.poi_nodes[0].tags.get("shop").map(String::as_str),
             Some("bakery")
         );
+    }
+
+    #[test]
+    fn write_osm_xml_string_round_trips_relations_with_tags_and_members() {
+        let data = OsmData {
+            nodes: HashMap::from([
+                (1, OsmNode { lat: 0.0, lon: 0.0 }),
+                (2, OsmNode { lat: 1.0, lon: 1.0 }),
+            ]),
+            ways: vec![
+                OsmWay {
+                    tags: HashMap::from([("landuse".to_string(), "park".to_string())]),
+                    node_refs: vec![1, 2],
+                },
+                OsmWay {
+                    tags: HashMap::from([("natural".to_string(), "water".to_string())]),
+                    node_refs: vec![2, 1],
+                },
+            ],
+            ways_by_id: HashMap::from([(100, 0), (101, 1)]),
+            relations: vec![OsmRelation {
+                tags: HashMap::from([
+                    ("type".to_string(), "multipolygon".to_string()),
+                    ("name".to_string(), "A&B Park".to_string()),
+                ]),
+                members: vec![
+                    RelationMember {
+                        way_id: 100,
+                        role: "outer".to_string(),
+                    },
+                    RelationMember {
+                        way_id: 101,
+                        role: "inner".to_string(),
+                    },
+                ],
+            }],
+            bounds: None,
+            poi_nodes: Vec::new(),
+            addr_nodes: Vec::new(),
+            tree_nodes: Vec::new(),
+        };
+
+        let xml = write_osm_xml_string(&data);
+        assert!(xml.contains("<relation id=\"-7000000000\">"));
+
+        let parsed = parse_osm_xml_str(&xml).unwrap();
+
+        assert_eq!(parsed.relations.len(), 1);
+        assert_eq!(parsed.relations[0].tags["name"], "A&B Park");
+        assert_eq!(parsed.relations[0].tags["type"], "multipolygon");
+        assert_eq!(parsed.relations[0].members.len(), 2);
+        assert_eq!(parsed.relations[0].members[0].way_id, 100);
+        assert_eq!(parsed.relations[0].members[0].role, "outer");
+        assert_eq!(parsed.relations[0].members[1].way_id, 101);
+        assert_eq!(parsed.relations[0].members[1].role, "inner");
+    }
+
+    #[test]
+    fn write_osm_xml_string_allocates_synthetic_node_ids_without_collisions() {
+        let data = OsmData {
+            nodes: HashMap::from([(-9_000_000_000, OsmNode { lat: 0.0, lon: 0.0 })]),
+            ways: Vec::new(),
+            ways_by_id: HashMap::new(),
+            relations: Vec::new(),
+            bounds: None,
+            poi_nodes: vec![OsmPoiNode {
+                lat: 1.0,
+                lon: 1.0,
+                tags: HashMap::from([("amenity".to_string(), "cafe".to_string())]),
+                source: FeatureSource::Overture,
+            }],
+            addr_nodes: Vec::new(),
+            tree_nodes: Vec::new(),
+        };
+
+        let first_xml = write_osm_xml_string(&data);
+        assert!(first_xml.contains("<node id=\"-9000000001\""));
+
+        let parsed = parse_osm_xml_str(&first_xml).unwrap();
+        let second_xml = write_osm_xml_string(&parsed);
+
+        let node_ids: Vec<i64> = second_xml
+            .lines()
+            .filter_map(|line| line.trim_start().strip_prefix("<node id=\""))
+            .filter_map(|rest| rest.split_once('"'))
+            .map(|(id, _)| id.parse::<i64>().unwrap())
+            .collect();
+        let unique_node_ids: std::collections::HashSet<_> = node_ids.iter().copied().collect();
+
+        assert_eq!(node_ids.len(), unique_node_ids.len());
+        assert!(unique_node_ids.contains(&-9_000_000_002));
     }
 }
