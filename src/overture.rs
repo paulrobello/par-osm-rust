@@ -54,13 +54,16 @@ impl OvertureTheme {
     }
 
     pub fn from_str_loose(s: &str) -> Option<Self> {
-        match s.to_lowercase().trim_end_matches('s') {
-            "building" => Some(Self::Building),
-            "transportation" | "transport" | "road" | "segment" => Some(Self::Transportation),
-            "place" => Some(Self::Place),
-            "base" | "land" | "land_use" | "landuse" | "water" => Some(Self::Base),
-            "address" | "addr" => Some(Self::Address),
-            _ => None,
+        let theme = s.to_lowercase();
+        match theme.as_str() {
+            "address" | "addresses" | "addr" => Some(Self::Address),
+            _ => match theme.strip_suffix('s').unwrap_or(&theme) {
+                "building" => Some(Self::Building),
+                "transportation" | "transport" | "road" | "segment" => Some(Self::Transportation),
+                "place" => Some(Self::Place),
+                "base" | "land" | "land_use" | "landuse" | "water" => Some(Self::Base),
+                _ => None,
+            },
         }
     }
 }
@@ -1186,6 +1189,40 @@ mod tests {
             }]
         })
         .to_string()
+    }
+
+    // ── Theme parsing tests ──────────────────────────────────────────────
+
+    #[test]
+    fn from_str_loose_parses_address_singular_and_plural() {
+        assert_eq!(
+            OvertureTheme::from_str_loose("address"),
+            Some(OvertureTheme::Address)
+        );
+        assert_eq!(
+            OvertureTheme::from_str_loose("addresses"),
+            Some(OvertureTheme::Address)
+        );
+    }
+
+    #[test]
+    fn from_str_loose_preserves_existing_accepted_forms() {
+        assert_eq!(
+            OvertureTheme::from_str_loose("buildings"),
+            Some(OvertureTheme::Building)
+        );
+        assert_eq!(
+            OvertureTheme::from_str_loose("roads"),
+            Some(OvertureTheme::Transportation)
+        );
+        assert_eq!(
+            OvertureTheme::from_str_loose("landuse"),
+            Some(OvertureTheme::Base)
+        );
+        assert_eq!(
+            OvertureTheme::from_str_loose("addr"),
+            Some(OvertureTheme::Address)
+        );
     }
 
     // ── CLI tests ────────────────────────────────────────────────────────
