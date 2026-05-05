@@ -166,37 +166,68 @@ pub fn is_cli_available() -> bool {
     }
 }
 
+const STDERR_SNIPPET_LIMIT: usize = 4096;
+
 fn stderr_suffix(stderr: &[u8]) -> String {
     let stderr = String::from_utf8_lossy(stderr);
     let stderr = stderr.trim();
     if stderr.is_empty() {
         String::new()
-    } else {
+    } else if stderr.len() <= STDERR_SNIPPET_LIMIT {
         format!(": {stderr}")
+    } else {
+        let head_len = STDERR_SNIPPET_LIMIT / 2;
+        let tail_len = STDERR_SNIPPET_LIMIT - head_len;
+        let head = str_prefix_at_boundary(stderr, head_len);
+        let tail = str_suffix_at_boundary(stderr, tail_len);
+        let omitted = stderr.len().saturating_sub(head.len() + tail.len());
+        format!(": {head}\n...[stderr truncated, {omitted} bytes omitted]...\n{tail}")
     }
 }
 
-fn wait_with_output_timeout(
+fn str_prefix_at_boundary(s: &str, max_bytes: usize) -> &str {
+    let mut end = max_bytes.min(s.len());
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+fn str_suffix_at_boundary(s: &str, max_bytes: usize) -> &str {
+    let mut start = s.len().saturating_sub(max_bytes);
+    while !s.is_char_boundary(start) {
+        start += 1;
+    }
+    &s[start..]
+}
+
+fn read_stderr_file(stderr_path: &Path, cli_type: &str) -> Result<Vec<u8>> {
+    std::fs::read(stderr_path)
+        .with_context(|| format!("reading overturemaps stderr for type '{cli_type}'"))
+}
+
+fn wait_with_stderr_file_timeout(
     mut child: std::process::Child,
+    stderr_path: &Path,
     timeout: Duration,
     timeout_secs: u64,
     cli_type: &str,
-) -> Result<std::process::Output> {
+) -> Result<(std::process::ExitStatus, Vec<u8>)> {
     let start = Instant::now();
     loop {
         match child.try_wait().context("polling overturemaps CLI")? {
-            Some(_) => {
-                return child
-                    .wait_with_output()
-                    .context("collecting overturemaps CLI output");
+            Some(status) => {
+                let stderr = read_stderr_file(stderr_path, cli_type)?;
+                return Ok((status, stderr));
             }
             None => {
                 if start.elapsed() >= timeout {
                     let _ = child.kill();
-                    let output = child
-                        .wait_with_output()
+                    child
+                        .wait()
                         .context("waiting for overturemaps CLI after timeout")?;
-                    let stderr_msg = stderr_suffix(&output.stderr);
+                    let stderr = read_stderr_file(stderr_path, cli_type)?;
+                    let stderr_msg = stderr_suffix(&stderr);
                     bail!(
                         "overturemaps CLI timed out after {timeout_secs}s for type '{cli_type}'{stderr_msg}"
                     );
@@ -242,6 +273,15 @@ pub fn fetch_geojson_for_type(
         .context("creating temp file for overturemaps output")?;
     let tmp_path = tmp.path().to_path_buf();
 
+    let stderr_tmp = tempfile::Builder::new()
+        .suffix(".stderr")
+        .tempfile()
+        .context("creating temp file for overturemaps stderr")?;
+    let stderr_path = stderr_tmp.path().to_path_buf();
+    let stderr_file = stderr_tmp
+        .reopen()
+        .context("opening temp file for overturemaps stderr")?;
+
     let child = std::process::Command::new("overturemaps")
         .arg("download")
         .arg("-f")
@@ -253,22 +293,23 @@ pub fn fetch_geojson_for_type(
         .arg("-o")
         .arg(&tmp_path)
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::from(stderr_file))
         .spawn()
         .context("spawning overturemaps CLI")?;
 
-    let output = wait_with_output_timeout(
+    let (status, stderr) = wait_with_stderr_file_timeout(
         child,
+        &stderr_path,
         Duration::from_secs(timeout_secs),
         timeout_secs,
         cli_type,
     )?;
 
-    if !output.status.success() {
-        let stderr_msg = stderr_suffix(&output.stderr);
+    if !status.success() {
+        let stderr_msg = stderr_suffix(&stderr);
         bail!(
             "overturemaps CLI exited with status {} for type '{cli_type}'{stderr_msg}",
-            output.status.code().unwrap_or(-1)
+            status.code().unwrap_or(-1)
         );
     }
 
@@ -1045,6 +1086,49 @@ pub fn fetch_overture_data_best_effort(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+    use std::sync::Mutex;
+
+    static PATH_LOCK: Mutex<()> = Mutex::new(());
+
+    struct PathGuard {
+        original_path: Option<OsString>,
+    }
+
+    impl Drop for PathGuard {
+        fn drop(&mut self) {
+            match &self.original_path {
+                Some(path) => unsafe { std::env::set_var("PATH", path) },
+                None => unsafe { std::env::remove_var("PATH") },
+            }
+        }
+    }
+
+    fn prepend_to_path(path: &Path) -> PathGuard {
+        let original_path = std::env::var_os("PATH");
+        let mut paths = vec![path.to_path_buf()];
+        if let Some(original) = &original_path {
+            paths.extend(std::env::split_paths(original));
+        }
+        let joined = std::env::join_paths(paths).expect("join PATH entries");
+        unsafe { std::env::set_var("PATH", joined) };
+
+        PathGuard { original_path }
+    }
+
+    #[cfg(unix)]
+    fn write_fake_overturemaps(dir: &Path, script: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = dir.join("overturemaps");
+        std::fs::write(&path, script).expect("write fake overturemaps script");
+        let mut permissions = std::fs::metadata(&path)
+            .expect("fake overturemaps metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions).expect("chmod fake overturemaps script");
+        path
+    }
 
     // ── helpers ──────────────────────────────────────────────────────────
 
@@ -1102,6 +1186,45 @@ mod tests {
             }]
         })
         .to_string()
+    }
+
+    // ── CLI tests ────────────────────────────────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn fetch_geojson_drains_large_stderr_without_waiting_for_timeout() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        write_fake_overturemaps(
+            tmp.path(),
+            r#"#!/bin/sh
+printf 'fake overturemaps useful error: stderr flood begins\n' >&2
+i=0
+while [ "$i" -lt 20000 ]; do
+  printf 'stderr filler line %05d abcdefghijklmnopqrstuvwxyz\n' "$i" >&2
+  i=$((i + 1))
+done
+printf 'fake overturemaps useful error: final diagnostic\n' >&2
+exit 23
+"#,
+        );
+
+        let _lock = PATH_LOCK.lock().expect("PATH lock poisoned");
+        let _path_guard = prepend_to_path(tmp.path());
+        let start = Instant::now();
+
+        let err = fetch_geojson_for_type("place", (51.5, -0.13, 51.52, -0.10), 5)
+            .expect_err("fake CLI should fail");
+
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "fetch should return promptly instead of waiting for timeout; elapsed {:?}",
+            start.elapsed()
+        );
+        let message = err.to_string();
+        assert!(
+            message.contains("fake overturemaps useful error"),
+            "error should include useful stderr snippet, got: {message}"
+        );
     }
 
     // ── Building tests ───────────────────────────────────────────────────
