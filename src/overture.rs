@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::osm::{FeatureSource, OsmData, OsmNode, OsmPoiNode, OsmWay};
 
@@ -132,18 +132,79 @@ fn next_synthetic_id() -> i64 {
 
 // ── CLI availability check ────────────────────────────────────────────────
 
+const CLI_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
+const CLI_POLL_INTERVAL: Duration = Duration::from_millis(250);
+
 /// Check whether the `overturemaps` CLI is available on the system PATH.
 ///
 /// Runs `overturemaps --version` with a short timeout.  Returns `true` if
 /// the command succeeds (exit code 0), `false` otherwise.
 pub fn is_cli_available() -> bool {
-    std::process::Command::new("overturemaps")
+    let Ok(mut child) = std::process::Command::new("overturemaps")
         .arg("--version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .spawn()
+    else {
+        return false;
+    };
+
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) => {
+                if start.elapsed() >= CLI_CHECK_TIMEOUT {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return false;
+                }
+                std::thread::sleep(CLI_POLL_INTERVAL);
+            }
+            Err(_) => return false,
+        }
+    }
+}
+
+fn stderr_suffix(stderr: &[u8]) -> String {
+    let stderr = String::from_utf8_lossy(stderr);
+    let stderr = stderr.trim();
+    if stderr.is_empty() {
+        String::new()
+    } else {
+        format!(": {stderr}")
+    }
+}
+
+fn wait_with_output_timeout(
+    mut child: std::process::Child,
+    timeout: Duration,
+    timeout_secs: u64,
+    cli_type: &str,
+) -> Result<std::process::Output> {
+    let start = Instant::now();
+    loop {
+        match child.try_wait().context("polling overturemaps CLI")? {
+            Some(_) => {
+                return child
+                    .wait_with_output()
+                    .context("collecting overturemaps CLI output");
+            }
+            None => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let output = child
+                        .wait_with_output()
+                        .context("waiting for overturemaps CLI after timeout")?;
+                    let stderr_msg = stderr_suffix(&output.stderr);
+                    bail!(
+                        "overturemaps CLI timed out after {timeout_secs}s for type '{cli_type}'{stderr_msg}"
+                    );
+                }
+                std::thread::sleep(CLI_POLL_INTERVAL);
+            }
+        }
+    }
 }
 
 // ── GeoJSON download via CLI ──────────────────────────────────────────────
@@ -181,58 +242,33 @@ pub fn fetch_geojson_for_type(
         .context("creating temp file for overturemaps output")?;
     let tmp_path = tmp.path().to_path_buf();
 
-    let mut child = std::process::Command::new("overturemaps")
-        .args([
-            "download",
-            "-f",
-            "geojson",
-            "--bbox",
-            &bbox_str,
-            "-t",
-            cli_type,
-            "-o",
-            tmp_path.to_str().unwrap_or_default(),
-        ])
+    let child = std::process::Command::new("overturemaps")
+        .arg("download")
+        .arg("-f")
+        .arg("geojson")
+        .arg("--bbox")
+        .arg(&bbox_str)
+        .arg("-t")
+        .arg(cli_type)
+        .arg("-o")
+        .arg(&tmp_path)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .context("spawning overturemaps CLI")?;
 
-    // Poll for completion up to the timeout using a background thread.
-    let timeout = Duration::from_secs(timeout_secs);
-    let start = std::time::Instant::now();
-    let status = loop {
-        match child.try_wait().context("polling overturemaps CLI")? {
-            Some(s) => break s,
-            None => {
-                if start.elapsed() >= timeout {
-                    let _ = child.kill();
-                    bail!("overturemaps CLI timed out after {timeout_secs}s for type '{cli_type}'");
-                }
-                std::thread::sleep(Duration::from_millis(250));
-            }
-        }
-    };
+    let output = wait_with_output_timeout(
+        child,
+        Duration::from_secs(timeout_secs),
+        timeout_secs,
+        cli_type,
+    )?;
 
-    if !status.success() {
-        let stderr = child
-            .stderr
-            .take()
-            .map(|mut s| {
-                let mut buf = String::new();
-                use std::io::Read;
-                let _ = s.read_to_string(&mut buf);
-                buf
-            })
-            .unwrap_or_default();
-        let stderr_msg = if stderr.trim().is_empty() {
-            String::new()
-        } else {
-            format!(": {}", stderr.trim())
-        };
+    if !output.status.success() {
+        let stderr_msg = stderr_suffix(&output.stderr);
         bail!(
             "overturemaps CLI exited with status {} for type '{cli_type}'{stderr_msg}",
-            status.code().unwrap_or(-1)
+            output.status.code().unwrap_or(-1)
         );
     }
 
@@ -650,28 +686,37 @@ pub struct OvertureCacheMeta {
 /// Return the Overture GeoJSON cache directory, creating it if needed.
 ///
 /// Priority:
-/// 1. `OVERTURE_CACHE_DIR` environment variable
-/// 2. `$HOME/.cache/osm-to-bedrock/overture/` (Linux / macOS)
-/// 3. `%LOCALAPPDATA%\osm-to-bedrock\overture` (Windows)
-/// 4. `<system-temp>/osm-to-bedrock-overture` (fallback)
+/// 1. `PAR_OSM_OVERTURE_CACHE_DIR` environment variable
+/// 2. `OVERTURE_CACHE_DIR` environment variable
+/// 3. shared default `overture` directory under [`crate::cache::shared_cache_root`]
+///
+/// Legacy osm-to-bedrock Overture cache migration is intentionally not
+/// performed here.
 pub fn overture_cache_dir() -> PathBuf {
-    let dir = if let Ok(override_dir) = std::env::var("OVERTURE_CACHE_DIR") {
-        PathBuf::from(override_dir)
-    } else if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home)
-            .join(".cache")
-            .join("osm-to-bedrock")
-            .join("overture")
-    } else if let Ok(local) = std::env::var("LOCALAPPDATA") {
-        PathBuf::from(local).join("osm-to-bedrock").join("overture")
-    } else {
-        std::env::temp_dir().join("osm-to-bedrock-overture")
-    };
+    let dir = overture_cache_dir_from_overrides(
+        env_path("PAR_OSM_OVERTURE_CACHE_DIR"),
+        env_path("OVERTURE_CACHE_DIR"),
+    );
 
     if let Err(e) = std::fs::create_dir_all(&dir) {
         log::warn!("Could not create Overture cache dir {}: {e}", dir.display());
     }
     dir
+}
+
+fn env_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+fn overture_cache_dir_from_overrides(
+    neutral_override: Option<PathBuf>,
+    legacy_override: Option<PathBuf>,
+) -> PathBuf {
+    neutral_override
+        .or(legacy_override)
+        .unwrap_or_else(|| crate::cache::shared_cache_root().join("overture"))
 }
 
 /// Build a deterministic SHA-256 cache key from a bounding box and CLI type.
@@ -1128,6 +1173,7 @@ mod tests {
         assert_eq!(data.poi_nodes.len(), 1);
         assert_eq!(data.poi_nodes[0].tags["amenity"], "restaurant");
         assert_eq!(data.poi_nodes[0].tags["name"], "The Bistro");
+        assert_eq!(data.poi_nodes[0].source, FeatureSource::Overture);
         assert!((data.poi_nodes[0].lat - 51.5).abs() < 1e-9);
         assert!((data.poi_nodes[0].lon - -0.1).abs() < 1e-9);
     }
@@ -1173,6 +1219,7 @@ mod tests {
         assert_eq!(data.addr_nodes.len(), 1);
         assert_eq!(data.addr_nodes[0].tags["addr:housenumber"], "42");
         assert_eq!(data.addr_nodes[0].tags["addr:street"], "Baker Street");
+        assert_eq!(data.addr_nodes[0].source, FeatureSource::Overture);
         // Should NOT appear in poi_nodes.
         assert_eq!(data.poi_nodes.len(), 0);
     }
@@ -1223,6 +1270,32 @@ mod tests {
     }
 
     // ── Cache tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn overture_cache_prefers_neutral_env_override() {
+        let neutral = PathBuf::from("/tmp/par-osm-overture");
+        let legacy = PathBuf::from("/tmp/legacy-overture");
+
+        let dir = overture_cache_dir_from_overrides(Some(neutral.clone()), Some(legacy));
+
+        assert_eq!(dir, neutral);
+    }
+
+    #[test]
+    fn overture_cache_uses_legacy_env_override_before_shared_default() {
+        let legacy = PathBuf::from("/tmp/legacy-overture");
+
+        let dir = overture_cache_dir_from_overrides(None, Some(legacy.clone()));
+
+        assert_eq!(dir, legacy);
+    }
+
+    #[test]
+    fn overture_cache_uses_shared_default() {
+        let dir = overture_cache_dir_from_overrides(None, None);
+
+        assert_eq!(dir, crate::cache::shared_cache_root().join("overture"));
+    }
 
     #[test]
     fn overture_cache_key_is_deterministic() {
