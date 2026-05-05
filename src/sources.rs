@@ -4,7 +4,7 @@ use crate::filter::FeatureFilter;
 use crate::osm::{FeatureSource, OsmData, OsmPoiNode};
 use crate::overture::OvertureParams;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PoiSourceMode {
     /// Use OSM POIs only.
@@ -16,26 +16,16 @@ pub enum PoiSourceMode {
     Both,
     /// Prefer Overture POIs, with OSM POIs as fallback when Overture is missing or
     /// returns no POIs.
+    #[default]
     OverturePreferred,
 }
 
-impl Default for PoiSourceMode {
-    fn default() -> Self {
-        Self::OverturePreferred
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OvertureFailureMode {
+    #[default]
     FallbackToOsm,
     Fail,
-}
-
-impl Default for OvertureFailureMode {
-    fn default() -> Self {
-        Self::FallbackToOsm
-    }
 }
 
 #[derive(Debug, Clone)]

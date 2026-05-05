@@ -697,7 +697,7 @@ fn escape_xml_attr(value: &str) -> String {
 
 fn write_tags(xml: &mut String, tags: &HashMap<String, String>) {
     let mut entries: Vec<_> = tags.iter().collect();
-    entries.sort_by(|(ak, _), (bk, _)| ak.cmp(bk));
+    entries.sort_by_key(|(key, _)| *key);
     for (key, value) in entries {
         xml.push_str("    <tag k=\"");
         xml.push_str(&escape_xml_attr(key));
