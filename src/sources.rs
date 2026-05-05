@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use anyhow::Result;
+
 use crate::filter::FeatureFilter;
 use crate::osm::{FeatureSource, OsmData, OsmPoiNode};
 use crate::overture::OvertureParams;
@@ -36,6 +38,19 @@ pub struct SourceOptions {
     pub overture: OvertureParams,
     pub poi_source_mode: PoiSourceMode,
     pub overture_failure_mode: OvertureFailureMode,
+}
+
+impl Default for SourceOptions {
+    fn default() -> Self {
+        Self {
+            filter: FeatureFilter::default(),
+            overpass_url: None,
+            use_overpass_cache: true,
+            overture: OvertureParams::default(),
+            poi_source_mode: PoiSourceMode::OverturePreferred,
+            overture_failure_mode: OvertureFailureMode::FallbackToOsm,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -211,9 +226,65 @@ pub fn merge_source_data(
     }
 }
 
+pub fn fetch_map_data(
+    bbox: (f64, f64, f64, f64),
+    options: &SourceOptions,
+    progress_cb: &mut dyn FnMut(f32, &str),
+) -> Result<SourceFetchResult> {
+    progress_cb(0.0, "Fetching OSM data…");
+    let overpass_url = match options.overpass_url.as_deref() {
+        Some(url) => url,
+        None => crate::overpass::default_overpass_url(),
+    };
+    let osm_data = crate::overpass::fetch_osm_data(
+        bbox,
+        &options.filter,
+        options.use_overpass_cache,
+        overpass_url,
+    )?;
+
+    let overture_requested = options.overture.enabled
+        || matches!(
+            options.poi_source_mode,
+            PoiSourceMode::OvertureOnly | PoiSourceMode::Both | PoiSourceMode::OverturePreferred
+        );
+
+    let overture_data = if overture_requested {
+        let mut overture_params = options.overture.clone();
+        overture_params.enabled = true;
+        match crate::overture::fetch_overture_data(bbox, &overture_params, progress_cb) {
+            Ok(data) => Some(data),
+            Err(err) if options.overture_failure_mode == OvertureFailureMode::FallbackToOsm => {
+                log::warn!("Overture fetch failed; falling back to OSM POIs: {err:#}");
+                None
+            }
+            Err(err) => return Err(err),
+        }
+    } else {
+        None
+    };
+
+    let mut result = merge_source_data(osm_data, overture_data, options.poi_source_mode);
+    result.data.clip_to_bbox(bbox);
+    progress_cb(1.0, "Map data ready");
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_options_default_uses_overture_preferred_with_fallback() {
+        let options = SourceOptions::default();
+
+        assert_eq!(options.poi_source_mode, PoiSourceMode::OverturePreferred);
+        assert_eq!(
+            options.overture_failure_mode,
+            OvertureFailureMode::FallbackToOsm
+        );
+        assert!(options.use_overpass_cache);
+    }
 
     fn empty_data() -> OsmData {
         OsmData {
