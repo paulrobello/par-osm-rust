@@ -667,6 +667,95 @@ pub fn parse_osm_file(path: &Path) -> Result<OsmData> {
     }
 }
 
+fn escape_xml_attr(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn write_tags(xml: &mut String, tags: &HashMap<String, String>) {
+    let mut entries: Vec<_> = tags.iter().collect();
+    entries.sort_by(|(ak, _), (bk, _)| ak.cmp(bk));
+    for (key, value) in entries {
+        xml.push_str("    <tag k=\"");
+        xml.push_str(&escape_xml_attr(key));
+        xml.push_str("\" v=\"");
+        xml.push_str(&escape_xml_attr(value));
+        xml.push_str("\"/>\n");
+    }
+}
+
+/// Serialize normalized [`OsmData`] into simple OSM XML that this crate and
+/// `osm-world` can parse again.
+pub fn write_osm_xml_string(data: &OsmData) -> String {
+    let mut xml =
+        String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<osm version=\"0.6\">\n");
+
+    if let Some((min_lat, min_lon, max_lat, max_lon)) = data.bounds {
+        xml.push_str(&format!(
+            "  <bounds minlat=\"{}\" minlon=\"{}\" maxlat=\"{}\" maxlon=\"{}\"/>\n",
+            min_lat, min_lon, max_lat, max_lon
+        ));
+    }
+
+    let mut nodes: Vec<_> = data.nodes.iter().collect();
+    nodes.sort_by_key(|(id, _)| **id);
+    for (id, node) in nodes {
+        xml.push_str(&format!(
+            "  <node id=\"{}\" lat=\"{}\" lon=\"{}\"/>\n",
+            id, node.lat, node.lon
+        ));
+    }
+
+    let mut synthetic_id = -9_000_000_000_i64;
+    for poi in &data.poi_nodes {
+        xml.push_str(&format!(
+            "  <node id=\"{}\" lat=\"{}\" lon=\"{}\">\n",
+            synthetic_id, poi.lat, poi.lon
+        ));
+        write_tags(&mut xml, &poi.tags);
+        xml.push_str("  </node>\n");
+        synthetic_id -= 1;
+    }
+
+    for addr in &data.addr_nodes {
+        xml.push_str(&format!(
+            "  <node id=\"{}\" lat=\"{}\" lon=\"{}\">\n",
+            synthetic_id, addr.lat, addr.lon
+        ));
+        write_tags(&mut xml, &addr.tags);
+        xml.push_str("  </node>\n");
+        synthetic_id -= 1;
+    }
+
+    for tree in &data.tree_nodes {
+        xml.push_str(&format!(
+            "  <node id=\"{}\" lat=\"{}\" lon=\"{}\">\n    <tag k=\"natural\" v=\"tree\"/>\n  </node>\n",
+            synthetic_id, tree.lat, tree.lon
+        ));
+        synthetic_id -= 1;
+    }
+
+    for (idx, way) in data.ways.iter().enumerate() {
+        let way_id = data
+            .ways_by_id
+            .iter()
+            .find_map(|(id, way_idx)| (*way_idx == idx).then_some(*id))
+            .unwrap_or_else(|| -8_000_000_000_i64 - idx as i64);
+        xml.push_str(&format!("  <way id=\"{}\">\n", way_id));
+        for node_ref in &way.node_refs {
+            xml.push_str(&format!("    <nd ref=\"{}\"/>\n", node_ref));
+        }
+        write_tags(&mut xml, &way.tags);
+        xml.push_str("  </way>\n");
+    }
+
+    xml.push_str("</osm>\n");
+    xml
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -828,5 +917,63 @@ mod tests {
         let (_, path) = tmp.into_parts();
         let data = parse_osm_file(&path).unwrap();
         assert_eq!(data.nodes.len(), 3);
+    }
+
+    #[test]
+    fn write_osm_xml_string_serializes_poi_nodes_with_tags() {
+        let data = OsmData {
+            nodes: HashMap::new(),
+            ways: Vec::new(),
+            ways_by_id: HashMap::new(),
+            relations: Vec::new(),
+            bounds: Some((51.5, -0.1, 51.6, -0.0)),
+            poi_nodes: vec![OsmPoiNode {
+                lat: 51.55,
+                lon: -0.05,
+                tags: HashMap::from([
+                    ("amenity".to_string(), "restaurant".to_string()),
+                    ("name".to_string(), "A&B Cafe".to_string()),
+                ]),
+                source: FeatureSource::Overture,
+            }],
+            addr_nodes: Vec::new(),
+            tree_nodes: Vec::new(),
+        };
+
+        let xml = write_osm_xml_string(&data);
+
+        assert!(
+            xml.contains("<bounds minlat=\"51.5\" minlon=\"-0.1\" maxlat=\"51.6\" maxlon=\"-0\"/>")
+        );
+        assert!(xml.contains("<tag k=\"amenity\" v=\"restaurant\"/>"));
+        assert!(xml.contains("<tag k=\"name\" v=\"A&amp;B Cafe\"/>"));
+    }
+
+    #[test]
+    fn write_osm_xml_string_round_trips_poi_nodes_through_parser() {
+        let data = OsmData {
+            nodes: HashMap::new(),
+            ways: Vec::new(),
+            ways_by_id: HashMap::new(),
+            relations: Vec::new(),
+            bounds: Some((51.5, -0.1, 51.6, -0.0)),
+            poi_nodes: vec![OsmPoiNode {
+                lat: 51.55,
+                lon: -0.05,
+                tags: HashMap::from([("shop".to_string(), "bakery".to_string())]),
+                source: FeatureSource::Overture,
+            }],
+            addr_nodes: Vec::new(),
+            tree_nodes: Vec::new(),
+        };
+
+        let xml = write_osm_xml_string(&data);
+        let parsed = parse_osm_xml_str(&xml).unwrap();
+
+        assert_eq!(parsed.poi_nodes.len(), 1);
+        assert_eq!(
+            parsed.poi_nodes[0].tags.get("shop").map(String::as_str),
+            Some("bakery")
+        );
     }
 }
