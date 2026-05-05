@@ -1,7 +1,7 @@
 //! Disk cache for raw Overpass XML responses.
 //!
 //! Layout: shared Overpass cache directory with `{sha256}.xml` + `{sha256}.meta.json`.
-//! Key:    SHA-256 of `"{s:.4},{w:.4},{n:.4},{e:.4}|roads={},buildings={},water={},landuse={},railways={}"`
+//! Key:    SHA-256 of `"v2|{s:.4},{w:.4},{n:.4},{e:.4}|roads={},buildings={},water={},landuse={},railways={}"`
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -10,6 +10,8 @@ use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
 use crate::filter::FeatureFilter;
+
+const CACHE_SCHEMA_VERSION: u8 = 2;
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -48,7 +50,8 @@ pub fn cache_dir() -> PathBuf {
 pub fn cache_key(bbox: (f64, f64, f64, f64), filter: &FeatureFilter) -> String {
     let (s, w, n, e) = bbox;
     let canonical = format!(
-        "{:.4},{:.4},{:.4},{:.4}|roads={},buildings={},water={},landuse={},railways={}",
+        "v{}|{:.4},{:.4},{:.4},{:.4}|roads={},buildings={},water={},landuse={},railways={}",
+        CACHE_SCHEMA_VERSION,
         s,
         w,
         n,

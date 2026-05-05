@@ -104,13 +104,20 @@ pub fn build_overpass_query(bbox: (f64, f64, f64, f64), filter: &FeatureFilter) 
     if filter.railways {
         parts.push(format!(r#"way["railway"="rail"]({b});"#));
     }
-    // POI nodes: shops, restaurants, amenities, and tourism spots are
-    // predominantly node features in OSM — ways alone would miss most of them.
-    parts.push(format!(r#"node["amenity"]({b});"#));
-    parts.push(format!(r#"node["shop"]({b});"#));
-    parts.push(format!(r#"node["tourism"]({b});"#));
-    parts.push(format!(r#"node["leisure"]({b});"#));
-    parts.push(format!(r#"node["historic"]({b});"#));
+    // Point and POI features are always included because they are lightweight
+    // and provide visible world detail independent of the larger feature filters.
+    for element in ["node", "way"] {
+        parts.push(format!(r#"{element}["amenity"]({b});"#));
+        parts.push(format!(r#"{element}["shop"]({b});"#));
+        parts.push(format!(r#"{element}["tourism"]({b});"#));
+        parts.push(format!(r#"{element}["leisure"]({b});"#));
+        parts.push(format!(r#"{element}["historic"]({b});"#));
+        parts.push(format!(
+            r#"{element}["man_made"~"^(tower|water_tower|chimney)$"]({b});"#
+        ));
+    }
+    parts.push(format!(r#"node["natural"="tree"]({b});"#));
+    parts.push(format!(r#"node["natural"~"^(peak|rock|spring)$"]({b});"#));
 
     if parts.is_empty() {
         bail!("all feature types are disabled — nothing to query");
@@ -212,6 +219,20 @@ mod tests {
         );
         assert!(q.contains(r#"way["landuse"]"#), "missing landuse");
         assert!(q.contains(r#"way["railway"="rail"]"#), "missing railway");
+        assert!(
+            q.contains(r#"node["natural"="tree"]"#),
+            "missing tree nodes"
+        );
+        assert!(
+            q.contains(r#"node["natural"~"^(peak|rock|spring)$"]"#),
+            "missing nature nodes"
+        );
+        assert!(
+            q.contains(r#"node["man_made"~"^(tower|water_tower|chimney)$"]"#),
+            "missing man-made landmark nodes"
+        );
+        assert!(q.contains(r#"way["amenity"]"#), "missing POI ways");
+        assert!(q.contains(r#"way["shop"]"#), "missing shop ways");
     }
 
     #[test]
@@ -262,8 +283,8 @@ mod tests {
 
     #[test]
     fn all_disabled_still_queries_poi_nodes() {
-        // Even when all feature categories are disabled, POI node queries
-        // (amenity, shop, tourism, leisure, historic) are always included.
+        // Even when all feature categories are disabled, lightweight point and
+        // POI queries are always included.
         let filter = FeatureFilter {
             roads: false,
             buildings: false,
@@ -275,6 +296,14 @@ mod tests {
         assert!(
             q.contains(r#"node["amenity"]"#),
             "POI node queries should always be present"
+        );
+        assert!(
+            q.contains(r#"way["amenity"]"#),
+            "POI way queries should always be present"
+        );
+        assert!(
+            q.contains(r#"node["natural"="tree"]"#),
+            "tree node queries should always be present"
         );
         assert!(!q.contains(r#"way["highway"]"#), "roads should be absent");
         assert!(
