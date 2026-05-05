@@ -13,4 +13,5 @@ pub mod osm;
 pub mod osm_cache;
 pub mod overpass;
 pub mod overture;
+pub mod sources;
 pub mod srtm;
