@@ -226,48 +226,125 @@ pub fn merge_source_data(
     }
 }
 
-pub fn fetch_map_data(
+fn emit_progress(
+    progress_cb: &mut dyn FnMut(f32, &str),
+    last_progress: &mut f32,
+    pct: f32,
+    message: &str,
+) {
+    let pct = if pct.is_finite() {
+        pct.clamp(0.0, 1.0)
+    } else {
+        *last_progress
+    };
+    if pct >= *last_progress {
+        *last_progress = pct;
+        progress_cb(pct, message);
+    }
+}
+
+pub(crate) fn fetch_map_data_with_fetchers<FetchOsm, FetchOverture>(
     bbox: (f64, f64, f64, f64),
     options: &SourceOptions,
     progress_cb: &mut dyn FnMut(f32, &str),
-) -> Result<SourceFetchResult> {
-    progress_cb(0.0, "Fetching OSM data…");
+    mut fetch_osm: FetchOsm,
+    mut fetch_overture: FetchOverture,
+) -> Result<SourceFetchResult>
+where
+    FetchOsm: FnMut((f64, f64, f64, f64), &FeatureFilter, bool, &str) -> Result<OsmData>,
+    FetchOverture:
+        FnMut((f64, f64, f64, f64), &OvertureParams, &mut dyn FnMut(f32, &str)) -> Result<OsmData>,
+{
+    const OSM_DONE_PROGRESS: f32 = 0.45;
+    const OVERTURE_DONE_PROGRESS: f32 = 0.90;
+    const MERGE_PROGRESS: f32 = 0.95;
+
+    let mut last_progress = 0.0;
+    emit_progress(progress_cb, &mut last_progress, 0.0, "Fetching OSM data…");
     let overpass_url = match options.overpass_url.as_deref() {
         Some(url) => url,
         None => crate::overpass::default_overpass_url(),
     };
-    let osm_data = crate::overpass::fetch_osm_data(
+    let osm_data = fetch_osm(
         bbox,
         &options.filter,
         options.use_overpass_cache,
         overpass_url,
     )?;
 
-    let overture_requested = options.overture.enabled
-        || matches!(
-            options.poi_source_mode,
-            PoiSourceMode::OvertureOnly | PoiSourceMode::Both | PoiSourceMode::OverturePreferred
+    let overture_data = if options.overture.enabled {
+        emit_progress(
+            progress_cb,
+            &mut last_progress,
+            OSM_DONE_PROGRESS,
+            "OSM data ready; fetching Overture data…",
         );
-
-    let overture_data = if overture_requested {
-        let mut overture_params = options.overture.clone();
-        overture_params.enabled = true;
-        match crate::overture::fetch_overture_data(bbox, &overture_params, progress_cb) {
+        let overture_params = options.overture.clone();
+        let mut overture_progress = |pct: f32, message: &str| {
+            let pct = if pct.is_finite() {
+                pct.clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let mapped = OSM_DONE_PROGRESS + pct * (OVERTURE_DONE_PROGRESS - OSM_DONE_PROGRESS);
+            emit_progress(progress_cb, &mut last_progress, mapped, message);
+        };
+        match fetch_overture(bbox, &overture_params, &mut overture_progress) {
             Ok(data) => Some(data),
             Err(err) if options.overture_failure_mode == OvertureFailureMode::FallbackToOsm => {
-                log::warn!("Overture fetch failed; falling back to OSM POIs: {err:#}");
-                None
+                let warning = format!("Overture fetch failed: {err:#}");
+                log::warn!(
+                    "{warning}; continuing with configured POI source mode {:?}",
+                    options.poi_source_mode
+                );
+                let mut result = merge_source_data(osm_data, None, options.poi_source_mode);
+                result.warnings.push(warning);
+                emit_progress(
+                    progress_cb,
+                    &mut last_progress,
+                    MERGE_PROGRESS,
+                    "Merging map data…",
+                );
+                result.data.clip_to_bbox(bbox);
+                emit_progress(progress_cb, &mut last_progress, 1.0, "Map data ready");
+                return Ok(result);
             }
             Err(err) => return Err(err),
         }
     } else {
+        emit_progress(
+            progress_cb,
+            &mut last_progress,
+            OVERTURE_DONE_PROGRESS,
+            "OSM data ready",
+        );
         None
     };
 
+    emit_progress(
+        progress_cb,
+        &mut last_progress,
+        MERGE_PROGRESS,
+        "Merging map data…",
+    );
     let mut result = merge_source_data(osm_data, overture_data, options.poi_source_mode);
     result.data.clip_to_bbox(bbox);
-    progress_cb(1.0, "Map data ready");
+    emit_progress(progress_cb, &mut last_progress, 1.0, "Map data ready");
     Ok(result)
+}
+
+pub fn fetch_map_data(
+    bbox: (f64, f64, f64, f64),
+    options: &SourceOptions,
+    progress_cb: &mut dyn FnMut(f32, &str),
+) -> Result<SourceFetchResult> {
+    fetch_map_data_with_fetchers(
+        bbox,
+        options,
+        progress_cb,
+        crate::overpass::fetch_osm_data,
+        crate::overture::fetch_overture_data,
+    )
 }
 
 #[cfg(test)]
@@ -317,6 +394,187 @@ mod tests {
             tags,
             source,
         }
+    }
+
+    fn test_bbox() -> (f64, f64, f64, f64) {
+        (0.0, 0.0, 1.0, 1.0)
+    }
+
+    #[test]
+    fn fetch_map_data_default_options_do_not_invoke_overture_fetcher() {
+        let options = SourceOptions::default();
+        let mut overture_called = false;
+        let mut progress = Vec::new();
+
+        let result = fetch_map_data_with_fetchers(
+            test_bbox(),
+            &options,
+            &mut |pct, message| progress.push((pct, message.to_string())),
+            |_, _, _, _| {
+                let mut osm = empty_data();
+                osm.poi_nodes.push(poi(
+                    0.5,
+                    0.5,
+                    "shop",
+                    "bakery",
+                    "Bakery",
+                    FeatureSource::Osm,
+                ));
+                Ok(osm)
+            },
+            |_, _, _| {
+                overture_called = true;
+                panic!("Overture fetcher should not be called when disabled");
+            },
+        )
+        .expect("fetch succeeds");
+
+        assert!(!overture_called);
+        assert_eq!(result.status, SourceStatus::OvertureFallbackToOsm);
+        assert_eq!(result.data.poi_nodes.len(), 1);
+        assert_eq!(result.data.poi_nodes[0].source, FeatureSource::Osm);
+        assert_eq!(progress.last().map(|(pct, _)| *pct), Some(1.0));
+    }
+
+    #[test]
+    fn fetch_map_data_enabled_overture_invokes_fetcher_and_dedupes_preferred_pois() {
+        let mut options = SourceOptions::default();
+        options.overture.enabled = true;
+        options.poi_source_mode = PoiSourceMode::OverturePreferred;
+        let mut overture_called = false;
+
+        let result = fetch_map_data_with_fetchers(
+            test_bbox(),
+            &options,
+            &mut |_, _| {},
+            |_, _, _, _| {
+                let mut osm = empty_data();
+                osm.poi_nodes.push(poi(
+                    0.50000,
+                    0.50000,
+                    "amenity",
+                    "restaurant",
+                    "Diner",
+                    FeatureSource::Osm,
+                ));
+                Ok(osm)
+            },
+            |_, params, progress| {
+                overture_called = true;
+                assert!(params.enabled);
+                progress(0.0, "Overture starting");
+                progress(1.0, "Overture done");
+                let mut overture = empty_data();
+                overture.poi_nodes.push(poi(
+                    0.50005,
+                    0.50005,
+                    "amenity",
+                    "restaurant",
+                    "Diner",
+                    FeatureSource::Overture,
+                ));
+                Ok(overture)
+            },
+        )
+        .expect("fetch succeeds");
+
+        assert!(overture_called);
+        assert_eq!(result.status, SourceStatus::OverturePreferred);
+        assert_eq!(result.data.poi_nodes.len(), 1);
+        assert_eq!(result.data.poi_nodes[0].source, FeatureSource::Overture);
+    }
+
+    #[test]
+    fn fetch_map_data_fallback_captures_overture_error_warning_and_keeps_osm_result() {
+        let mut options = SourceOptions::default();
+        options.overture.enabled = true;
+        options.poi_source_mode = PoiSourceMode::OverturePreferred;
+        options.overture_failure_mode = OvertureFailureMode::FallbackToOsm;
+
+        let result = fetch_map_data_with_fetchers(
+            test_bbox(),
+            &options,
+            &mut |_, _| {},
+            |_, _, _, _| {
+                let mut osm = empty_data();
+                osm.poi_nodes.push(poi(
+                    0.5,
+                    0.5,
+                    "shop",
+                    "bakery",
+                    "Bakery",
+                    FeatureSource::Osm,
+                ));
+                Ok(osm)
+            },
+            |_, _, _| anyhow::bail!("synthetic overture failure"),
+        )
+        .expect("fallback succeeds");
+
+        assert_eq!(result.status, SourceStatus::OvertureFallbackToOsm);
+        assert_eq!(result.data.poi_nodes.len(), 1);
+        assert_eq!(result.data.poi_nodes[0].source, FeatureSource::Osm);
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("synthetic overture failure"))
+        );
+    }
+
+    #[test]
+    fn fetch_map_data_strict_overture_failure_returns_error() {
+        let mut options = SourceOptions::default();
+        options.overture.enabled = true;
+        options.overture_failure_mode = OvertureFailureMode::Fail;
+
+        let err = match fetch_map_data_with_fetchers(
+            test_bbox(),
+            &options,
+            &mut |_, _| {},
+            |_, _, _, _| Ok(empty_data()),
+            |_, _, _| anyhow::bail!("strict overture failure"),
+        ) {
+            Ok(_) => panic!("strict mode should return Overture error"),
+            Err(err) => err,
+        };
+
+        assert!(err.to_string().contains("strict overture failure"));
+    }
+
+    #[test]
+    fn fetch_map_data_progress_is_monotonic_and_finishes_at_one() {
+        let mut options = SourceOptions::default();
+        options.overture.enabled = true;
+        let mut progress_values = Vec::new();
+
+        fetch_map_data_with_fetchers(
+            test_bbox(),
+            &options,
+            &mut |pct, _| progress_values.push(pct),
+            |_, _, _, _| Ok(empty_data()),
+            |_, _, progress| {
+                progress(0.0, "Overture reset to zero");
+                progress(0.5, "Overture halfway");
+                progress(1.0, "Overture complete");
+                Ok(empty_data())
+            },
+        )
+        .expect("fetch succeeds");
+
+        assert!(!progress_values.is_empty());
+        for window in progress_values.windows(2) {
+            assert!(
+                window[0] <= window[1],
+                "progress moved backwards: {progress_values:?}"
+            );
+        }
+        assert!(
+            progress_values[..progress_values.len() - 1]
+                .iter()
+                .all(|pct| *pct < 1.0)
+        );
+        assert_eq!(progress_values.last().copied(), Some(1.0));
     }
 
     #[test]
