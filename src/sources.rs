@@ -1,3 +1,15 @@
+//! Shared source orchestration for OSM/Overpass plus optional Overture Maps data.
+//!
+//! This module is the preferred entry point for applications that want a single
+//! fetch path with consistent source policy, POI dedupe, fallback warnings, and
+//! progress reporting. It always fetches OSM/Overpass data first. Overture is
+//! fetched only when [`SourceOptions::overture`] has `enabled = true`; source
+//! mode alone never forces an Overture network/CLI request.
+//!
+//! The pure merge function [`merge_source_data`] is separated from the
+//! side-effecting [`fetch_map_data`] entry point so tests and consumers can reuse
+//! the policy logic with already-loaded data.
+
 use std::collections::HashMap;
 
 use anyhow::Result;
@@ -6,6 +18,11 @@ use crate::filter::FeatureFilter;
 use crate::osm::{FeatureSource, OsmData, OsmPoiNode};
 use crate::overture::OvertureParams;
 
+/// Policy for which POI source should appear in the normalized output.
+///
+/// Non-POI Overture geometry may still be merged according to Overture theme
+/// priority when Overture data is fetched. This enum only controls the final
+/// `OsmData::poi_nodes` collection.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PoiSourceMode {
@@ -22,21 +39,32 @@ pub enum PoiSourceMode {
     OverturePreferred,
 }
 
+/// How [`fetch_map_data`] handles Overture fetch failures when Overture is enabled.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OvertureFailureMode {
+    /// Return OSM data with a warning when Overture fails.
     #[default]
     FallbackToOsm,
+    /// Return an error when Overture fails.
     Fail,
 }
 
+/// Configuration for [`fetch_map_data`].
 #[derive(Debug, Clone)]
 pub struct SourceOptions {
+    /// Feature categories to request from OSM/Overpass.
     pub filter: FeatureFilter,
+    /// Explicit Overpass endpoint. `None` uses [`crate::overpass::default_overpass_url`].
     pub overpass_url: Option<String>,
+    /// Whether to read existing raw Overpass cache entries before fetching.
+    /// Freshly fetched Overpass XML is still written to cache on success.
     pub use_overpass_cache: bool,
+    /// Overture Maps fetch configuration. Overture is skipped unless `enabled` is `true`.
     pub overture: OvertureParams,
+    /// Policy for final POI source selection and dedupe.
     pub poi_source_mode: PoiSourceMode,
+    /// Failure policy for Overture fetch errors.
     pub overture_failure_mode: OvertureFailureMode,
 }
 
@@ -53,19 +81,29 @@ impl Default for SourceOptions {
     }
 }
 
+/// Effective source outcome after fetching and merging.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceStatus {
+    /// Output contains OSM POIs only.
     OsmOnly,
+    /// Output contains Overture POIs only.
     OvertureOnly,
+    /// Output merged both sources with dedupe.
     Both,
+    /// Output preferred Overture POIs successfully.
     OverturePreferred,
+    /// Overture was requested but unavailable, failed, or returned no POIs; OSM POIs were used.
     OvertureFallbackToOsm,
 }
 
+/// Data and metadata returned by [`fetch_map_data`] and [`merge_source_data`].
 pub struct SourceFetchResult {
+    /// Normalized map data after source merge policy has been applied.
     pub data: OsmData,
+    /// Effective source outcome.
     pub status: SourceStatus,
+    /// Human-readable non-fatal warnings, usually Overture fallback reasons.
     pub warnings: Vec<String>,
 }
 
@@ -126,6 +164,11 @@ fn dedupe_pois_with_overture_preference(mut pois: Vec<OsmPoiNode>) -> Vec<OsmPoi
     kept
 }
 
+/// Merge already-loaded OSM and optional Overture data according to `poi_source_mode`.
+///
+/// Duplicate POIs are detected by category, normalized name, and distance. When
+/// both sources describe the same POI, the Overture representative is retained.
+/// This function performs no network or cache I/O.
 pub fn merge_source_data(
     mut osm_data: OsmData,
     overture_data: Option<OsmData>,
@@ -333,6 +376,16 @@ where
     Ok(result)
 }
 
+/// Fetch OSM/Overpass data, optionally fetch Overture data, and apply source policy.
+///
+/// `bbox` is `(south, west, north, east)` in decimal degrees. `progress` receives
+/// monotonically increasing values in the range `0.0..=1.0` for the source fetch
+/// phase. The function uses blocking I/O and should be called from an appropriate
+/// worker thread in async/UI applications.
+///
+/// Overture fetches are gated by `options.overture.enabled`. If Overture is
+/// disabled, no Overture CLI check, cache read, or network request is performed
+/// even when `options.poi_source_mode` is [`PoiSourceMode::OverturePreferred`].
 pub fn fetch_map_data(
     bbox: (f64, f64, f64, f64),
     options: &SourceOptions,

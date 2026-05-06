@@ -25,14 +25,20 @@ use crate::osm::{FeatureSource, OsmData, OsmNode, OsmPoiNode, OsmWay};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OvertureTheme {
+    /// Building footprints and building metadata.
     Building,
+    /// Transportation segments, normalized mostly as OSM-style roads.
     Transportation,
+    /// Places and POIs, normalized into tagged POI nodes.
     Place,
+    /// Base land, land-use, water, and tree features.
     Base,
+    /// Address points, normalized into address nodes.
     Address,
 }
 
 impl OvertureTheme {
+    /// Return all supported themes in a stable default order.
     pub fn all() -> Vec<Self> {
         vec![
             Self::Building,
@@ -43,6 +49,7 @@ impl OvertureTheme {
         ]
     }
 
+    /// Return the `overturemaps download --type` values used for this theme.
     pub fn cli_types(&self) -> Vec<&'static str> {
         match self {
             Self::Building => vec!["building"],
@@ -53,6 +60,7 @@ impl OvertureTheme {
         }
     }
 
+    /// Parse a user-facing theme string, accepting singular/plural aliases.
     pub fn from_str_loose(s: &str) -> Option<Self> {
         let theme = s.to_lowercase();
         match theme.as_str() {
@@ -84,8 +92,11 @@ impl std::fmt::Display for OvertureTheme {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ThemePriority {
+    /// Prefer Overture features for this theme.
     Overture,
+    /// Prefer OSM/Overpass features for this theme.
     Osm,
+    /// Keep features from both sources.
     #[default]
     Both,
 }
@@ -93,9 +104,13 @@ pub enum ThemePriority {
 /// Parameters controlling Overture Maps data integration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OvertureParams {
+    /// Whether Overture should be fetched. Defaults to `false`.
     pub enabled: bool,
+    /// Overture themes to fetch when enabled. Defaults to all supported themes.
     pub themes: Vec<OvertureTheme>,
+    /// Per-theme source priority for non-POI features. Missing entries default to [`ThemePriority::Both`].
     pub priority: HashMap<OvertureTheme, ThemePriority>,
+    /// Timeout for each Overture CLI download command.
     pub timeout_secs: u64,
 }
 
@@ -111,6 +126,7 @@ impl Default for OvertureParams {
 }
 
 impl OvertureParams {
+    /// Return the configured priority for `theme`, defaulting to [`ThemePriority::Both`].
     pub fn priority_for(&self, theme: OvertureTheme) -> ThemePriority {
         self.priority
             .get(&theme)
@@ -720,10 +736,15 @@ pub fn parse_overture_geojson(geojson_str: &str, theme: OvertureTheme) -> Result
 
 /// Serialised metadata stored alongside the `.geojson` cache file.
 #[derive(Debug, Serialize, Deserialize)]
+/// Metadata stored beside cached Overture GeoJSON files.
 pub struct OvertureCacheMeta {
+    /// Bounding box `[south, west, north, east]` for the cached download.
     pub bbox: [f64; 4],
+    /// Overture CLI type value, such as `place`, `building`, or `segment`.
     pub cli_type: String,
+    /// UTC creation timestamp.
     pub created_at: DateTime<Utc>,
+    /// GeoJSON payload size in bytes.
     pub size_bytes: u64,
 }
 
@@ -797,6 +818,7 @@ pub fn overture_cache_write(
 
 /// A single Overture cache entry for listing purposes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// A single Overture cache entry returned by [`list_overture_areas`].
 pub struct OvertureCacheEntry {
     pub key: String,
     pub bbox: [f64; 4],
@@ -924,6 +946,12 @@ fn empty_osm_data() -> OsmData {
 ///
 /// Returns an error if `params.enabled` is false, the CLI is not installed,
 /// or any theme fetch or parse fails.
+/// Fetch Overture data for the enabled themes in `params` and normalize it into [`OsmData`].
+///
+/// This function shells out to the optional `overturemaps` CLI and may perform
+/// network I/O. The returned data can be merged with OSM data via
+/// [`crate::sources::merge_source_data`] or fetched through the higher-level
+/// [`crate::sources::fetch_map_data`] orchestrator.
 pub fn fetch_overture_data(
     bbox: (f64, f64, f64, f64),
     params: &OvertureParams,
@@ -997,9 +1025,14 @@ pub fn fetch_overture_data(
 
 /// Like [`fetch_overture_data`] but never fails.
 ///
+/// - If Overture is disabled, returns empty [`OsmData`].
 /// - If the CLI is unavailable, returns empty [`OsmData`] after logging a warning.
 /// - If a theme fetch fails, logs a warning and skips it.
 /// - If parsing a GeoJSON result fails, logs a warning and skips it.
+///
+/// Use this lower-level helper when callers want partial Overture data without
+/// bubbling errors. Applications that need explicit fallback status should prefer
+/// [`crate::sources::fetch_map_data`].
 pub fn fetch_overture_data_best_effort(
     bbox: (f64, f64, f64, f64),
     params: &OvertureParams,
