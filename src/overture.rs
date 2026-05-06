@@ -734,33 +734,11 @@ pub struct OvertureCacheMeta {
 /// 2. `OVERTURE_CACHE_DIR` environment variable
 /// 3. shared default `overture` directory under [`crate::cache::shared_cache_root`]
 ///
-/// Legacy osm-to-bedrock Overture cache migration is intentionally not
-/// performed here.
+/// When using the shared default, legacy osm-to-bedrock Overture cache files are
+/// migrated into the shared cache on first use. Environment overrides are never
+/// migrated.
 pub fn overture_cache_dir() -> PathBuf {
-    let dir = overture_cache_dir_from_overrides(
-        env_path("PAR_OSM_OVERTURE_CACHE_DIR"),
-        env_path("OVERTURE_CACHE_DIR"),
-    );
-
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        log::warn!("Could not create Overture cache dir {}: {e}", dir.display());
-    }
-    dir
-}
-
-fn env_path(name: &str) -> Option<PathBuf> {
-    std::env::var_os(name)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-}
-
-fn overture_cache_dir_from_overrides(
-    neutral_override: Option<PathBuf>,
-    legacy_override: Option<PathBuf>,
-) -> PathBuf {
-    neutral_override
-        .or(legacy_override)
-        .unwrap_or_else(|| crate::cache::shared_cache_root().join("overture"))
+    crate::cache::overture_cache_dir()
 }
 
 /// Build a deterministic SHA-256 cache key from a bounding box and CLI type.
@@ -1430,32 +1408,6 @@ exit 23
     }
 
     // ── Cache tests ──────────────────────────────────────────────────────
-
-    #[test]
-    fn overture_cache_prefers_neutral_env_override() {
-        let neutral = PathBuf::from("/tmp/par-osm-overture");
-        let legacy = PathBuf::from("/tmp/legacy-overture");
-
-        let dir = overture_cache_dir_from_overrides(Some(neutral.clone()), Some(legacy));
-
-        assert_eq!(dir, neutral);
-    }
-
-    #[test]
-    fn overture_cache_uses_legacy_env_override_before_shared_default() {
-        let legacy = PathBuf::from("/tmp/legacy-overture");
-
-        let dir = overture_cache_dir_from_overrides(None, Some(legacy.clone()));
-
-        assert_eq!(dir, legacy);
-    }
-
-    #[test]
-    fn overture_cache_uses_shared_default() {
-        let dir = overture_cache_dir_from_overrides(None, None);
-
-        assert_eq!(dir, crate::cache::shared_cache_root().join("overture"));
-    }
 
     #[test]
     fn overture_cache_key_is_deterministic() {

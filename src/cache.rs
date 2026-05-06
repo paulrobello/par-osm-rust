@@ -13,6 +13,7 @@ const LEGACY_CACHE_NAME: &str = "osm-to-bedrock";
 pub struct MigrationReport {
     pub overpass: CacheMigrationReport,
     pub srtm: CacheMigrationReport,
+    pub overture: CacheMigrationReport,
 }
 
 /// Summary for migrating one legacy cache directory into its shared location.
@@ -66,11 +67,30 @@ pub fn srtm_cache_dir() -> PathBuf {
     dir
 }
 
-/// Migrate legacy osm-to-bedrock Overpass and SRTM caches into shared defaults.
+/// Return the Overture GeoJSON cache directory, creating it if possible.
+///
+/// Priority:
+/// 1. `PAR_OSM_OVERTURE_CACHE_DIR`
+/// 2. `OVERTURE_CACHE_DIR`
+/// 3. shared default `overture` directory
+pub fn overture_cache_dir() -> PathBuf {
+    let override_dir =
+        env_dir("PAR_OSM_OVERTURE_CACHE_DIR").or_else(|| env_dir("OVERTURE_CACHE_DIR"));
+    let is_default = override_dir.is_none();
+    let dir = override_dir.unwrap_or_else(|| shared_cache_root().join("overture"));
+    ensure_dir(&dir, "Overture");
+    if is_default {
+        migrate_legacy_cache_dir_if_default(&dir, "overture");
+    }
+    dir
+}
+
+/// Migrate legacy osm-to-bedrock Overpass, SRTM, and Overture caches into shared defaults.
 pub fn migrate_legacy_caches() -> Result<MigrationReport> {
     Ok(MigrationReport {
         overpass: migrate_legacy_cache_dir("overpass")?,
         srtm: migrate_legacy_cache_dir("srtm")?,
+        overture: migrate_legacy_cache_dir("overture")?,
     })
 }
 
@@ -228,6 +248,8 @@ mod tests {
         "OVERPASS_CACHE_DIR",
         "PAR_OSM_SRTM_CACHE_DIR",
         "SRTM_CACHE_DIR",
+        "PAR_OSM_OVERTURE_CACHE_DIR",
+        "OVERTURE_CACHE_DIR",
     ];
 
     fn env_lock() -> &'static Mutex<()> {
@@ -379,6 +401,40 @@ mod tests {
     }
 
     #[test]
+    fn overture_cache_prefers_neutral_env_var() {
+        let _guard = env_lock().lock().unwrap();
+        let env = EnvSnapshot::capture();
+        isolate_cache_env(&env);
+        let tmp = TempDir::new().unwrap();
+        let neutral = tmp.path().join("neutral-overture");
+        let legacy_override = tmp.path().join("legacy-overture");
+        env.set_path("PAR_OSM_OVERTURE_CACHE_DIR", &neutral);
+        env.set_path("OVERTURE_CACHE_DIR", &legacy_override);
+
+        let dir = overture_cache_dir();
+
+        assert_eq!(dir, neutral);
+        assert!(dir.exists());
+    }
+
+    #[test]
+    fn overture_cache_uses_legacy_env_var_before_default() {
+        let _guard = env_lock().lock().unwrap();
+        let env = EnvSnapshot::capture();
+        isolate_cache_env(&env);
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        let legacy_override = tmp.path().join("legacy-overture");
+        env.set_path("HOME", &home);
+        env.set_path("OVERTURE_CACHE_DIR", &legacy_override);
+
+        let dir = overture_cache_dir();
+
+        assert_eq!(dir, legacy_override);
+        assert!(dir.exists());
+    }
+
+    #[test]
     fn overpass_cache_default_migrates_legacy_files_on_first_use() {
         let _guard = env_lock().lock().unwrap();
         let env = EnvSnapshot::capture();
@@ -395,6 +451,73 @@ mod tests {
         assert_eq!(dir, tmp.path().join(".cache/par-osm-rust/overpass"));
         assert!(shared_file.exists());
         assert!(!legacy.join("abc.xml").exists());
+    }
+
+    #[test]
+    fn overture_cache_default_migrates_legacy_files_on_first_use() {
+        let _guard = env_lock().lock().unwrap();
+        let env = EnvSnapshot::capture();
+        isolate_cache_env(&env);
+        let tmp = TempDir::new().unwrap();
+        env.set_path("HOME", tmp.path());
+        let legacy = tmp.path().join(".cache/osm-to-bedrock/overture");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("places.geojson"), "{}").unwrap();
+        fs::write(legacy.join("places.meta.json"), "{}").unwrap();
+
+        let dir = crate::overture::overture_cache_dir();
+
+        assert_eq!(dir, tmp.path().join(".cache/par-osm-rust/overture"));
+        assert!(dir.join("places.geojson").exists());
+        assert!(dir.join("places.meta.json").exists());
+        assert!(!legacy.join("places.geojson").exists());
+        assert!(!legacy.join("places.meta.json").exists());
+    }
+
+    #[test]
+    fn overture_cache_env_override_does_not_migrate_legacy_files() {
+        let _guard = env_lock().lock().unwrap();
+        let env = EnvSnapshot::capture();
+        isolate_cache_env(&env);
+        let tmp = TempDir::new().unwrap();
+        env.set_path("HOME", tmp.path());
+        let override_dir = tmp.path().join("custom-overture-cache");
+        env.set_path("PAR_OSM_OVERTURE_CACHE_DIR", &override_dir);
+        let legacy = tmp.path().join(".cache/osm-to-bedrock/overture");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("places.geojson"), "{}").unwrap();
+
+        let dir = crate::overture::overture_cache_dir();
+
+        assert_eq!(dir, override_dir);
+        assert!(dir.exists());
+        assert!(legacy.join("places.geojson").exists());
+        assert!(
+            !tmp.path()
+                .join(".cache/par-osm-rust/overture/places.geojson")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn overture_cache_override_matching_default_does_not_migrate_legacy_files() {
+        let _guard = env_lock().lock().unwrap();
+        let env = EnvSnapshot::capture();
+        isolate_cache_env(&env);
+        let tmp = TempDir::new().unwrap();
+        env.set_path("HOME", tmp.path());
+        let default_dir = tmp.path().join(".cache/par-osm-rust/overture");
+        env.set_path("OVERTURE_CACHE_DIR", &default_dir);
+        let legacy = tmp.path().join(".cache/osm-to-bedrock/overture");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("places.geojson"), "{}").unwrap();
+
+        let dir = crate::overture::overture_cache_dir();
+
+        assert_eq!(dir, default_dir);
+        assert!(dir.exists());
+        assert!(legacy.join("places.geojson").exists());
+        assert!(!dir.join("places.geojson").exists());
     }
 
     #[test]
@@ -494,7 +617,7 @@ mod tests {
     }
 
     #[test]
-    fn migrate_legacy_caches_reports_both_cache_types() {
+    fn migrate_legacy_caches_reports_all_cache_types() {
         let _guard = env_lock().lock().unwrap();
         let env = EnvSnapshot::capture();
         isolate_cache_env(&env);
@@ -502,10 +625,13 @@ mod tests {
         env.set_path("HOME", tmp.path());
         let overpass_legacy = tmp.path().join(".cache/osm-to-bedrock/overpass");
         let srtm_legacy = tmp.path().join(".cache/osm-to-bedrock/srtm");
+        let overture_legacy = tmp.path().join(".cache/osm-to-bedrock/overture");
         fs::create_dir_all(&overpass_legacy).unwrap();
         fs::create_dir_all(&srtm_legacy).unwrap();
+        fs::create_dir_all(&overture_legacy).unwrap();
         fs::write(overpass_legacy.join("abc.xml"), "<osm />").unwrap();
         fs::write(srtm_legacy.join("N38W122.hgt"), "hgt").unwrap();
+        fs::write(overture_legacy.join("places.geojson"), "{}").unwrap();
 
         let report = migrate_legacy_caches().unwrap();
 
@@ -514,5 +640,9 @@ mod tests {
             1
         );
         assert_eq!(report.srtm.moved_files + report.srtm.copied_files, 1);
+        assert_eq!(
+            report.overture.moved_files + report.overture.copied_files,
+            1
+        );
     }
 }
