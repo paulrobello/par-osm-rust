@@ -2,6 +2,7 @@
 //! Overpass API integration: QL query builder and HTTP fetch.
 
 use anyhow::{Result, bail};
+use reqwest::header::{CONTENT_TYPE, USER_AGENT};
 use url::Url;
 
 use crate::filter::FeatureFilter;
@@ -9,6 +10,14 @@ use crate::osm::OsmData;
 
 const DEFAULT_OVERPASS_URL: &str = "https://overpass-api.de/api/interpreter";
 const OVERPASS_TIMEOUT_SECS: u64 = 60;
+const OVERPASS_USER_AGENT: &str = concat!(
+    env!("CARGO_PKG_NAME"),
+    "/",
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("CARGO_PKG_REPOSITORY"),
+    ")"
+);
 
 /// Approved Overpass API hostnames. Only HTTPS URLs whose host appears in this
 /// list are accepted. All other values are rejected to prevent SSRF attacks.
@@ -147,11 +156,8 @@ pub fn fetch_osm_xml(
         .timeout(std::time::Duration::from_secs(OVERPASS_TIMEOUT_SECS))
         .build()?;
 
-    let res = client
-        .post(overpass_url)
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .body(format!("data={}", urlencoding::encode(&query)))
-        .send()?;
+    let request = build_overpass_request(&client, overpass_url, &query)?;
+    let res = client.execute(request)?;
 
     if res.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
         bail!("Overpass is busy — try again in a few minutes");
@@ -163,6 +169,19 @@ pub fn fetch_osm_xml(
     }
 
     Ok(res.text()?)
+}
+
+fn build_overpass_request(
+    client: &reqwest::blocking::Client,
+    overpass_url: &str,
+    query: &str,
+) -> Result<reqwest::blocking::Request> {
+    Ok(client
+        .post(overpass_url)
+        .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .header(USER_AGENT, OVERPASS_USER_AGENT)
+        .body(format!("data={}", urlencoding::encode(query)))
+        .build()?)
 }
 
 /// Fetch OSM data from Overpass (or cache) and parse it into `OsmData`.
@@ -205,6 +224,24 @@ pub fn fetch_osm_data(
 mod tests {
     use super::*;
     use crate::filter::FeatureFilter;
+
+    #[test]
+    fn overpass_request_includes_user_agent() {
+        let client = reqwest::blocking::Client::builder().build().unwrap();
+        let request =
+            build_overpass_request(&client, default_overpass_url(), "node(0,0,1,1);").unwrap();
+
+        let user_agent = request
+            .headers()
+            .get(USER_AGENT)
+            .and_then(|value| value.to_str().ok())
+            .unwrap();
+        assert!(user_agent.contains("par-osm-rust/"));
+        assert_eq!(
+            request.headers().get(CONTENT_TYPE).unwrap(),
+            "application/x-www-form-urlencoded"
+        );
+    }
 
     #[test]
     fn query_includes_all_types_by_default() {
