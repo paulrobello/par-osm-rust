@@ -175,15 +175,15 @@ pub fn fetch_osm_data(
     use_cache: bool,
     overpass_url: &str,
 ) -> Result<OsmData> {
-    let key = crate::osm_cache::cache_key(bbox, filter);
+    let key = crate::osm_cache::cache_key_for_url(bbox, filter, overpass_url);
 
     if use_cache {
-        if let Some(xml) = crate::osm_cache::read(&key) {
+        if let Some(xml) = crate::osm_cache::read_for_url(&key, overpass_url) {
             log::info!("Cache hit for key {}", &key[..8]);
             return crate::osm::parse_osm_xml_str(&xml);
         }
         // Second-chance: containment lookup
-        if let Some(xml) = crate::osm_cache::find_containing(bbox, filter) {
+        if let Some(xml) = crate::osm_cache::find_containing_for_url(bbox, filter, overpass_url) {
             log::info!("Cache containment hit — reusing larger cached area");
             return crate::osm::parse_osm_xml_str(&xml);
         }
@@ -194,7 +194,7 @@ pub fn fetch_osm_data(
 
     let xml = fetch_osm_xml(bbox, filter, overpass_url)?;
 
-    if let Err(e) = crate::osm_cache::write(&key, bbox, filter, &xml) {
+    if let Err(e) = crate::osm_cache::write_for_url(&key, bbox, filter, &xml, overpass_url) {
         log::warn!("Cache write failed: {e}");
     }
 

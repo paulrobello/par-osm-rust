@@ -1,17 +1,21 @@
 //! Disk cache for raw Overpass XML responses.
 //!
 //! Layout: shared Overpass cache directory with `{sha256}.xml` + `{sha256}.meta.json`.
-//! Key:    SHA-256 of `"v2|{s:.4},{w:.4},{n:.4},{e:.4}|roads={},buildings={},water={},landuse={},railways={}"`
+//! Legacy key: SHA-256 of `"v2|{s:.4},{w:.4},{n:.4},{e:.4}|roads={},buildings={},water={},landuse={},railways={}"`.
+//! URL-aware key: SHA-256 of `"overpass-url-v3|{canonical_url}|{s:.4},{w:.4},{n:.4},{e:.4}|roads={},buildings={},water={},landuse={},railways={}"`.
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
+use url::Url;
 
 use crate::filter::FeatureFilter;
 
 const CACHE_SCHEMA_VERSION: u8 = 2;
+const URL_AWARE_CACHE_SCHEMA_VERSION: u8 = 3;
+const URL_AWARE_CACHE_PREFIX: &str = "overpass-url";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -32,6 +36,8 @@ struct CacheMeta {
     filter: FeatureFilter,
     created_at: DateTime<Utc>,
     size_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    overpass_url: Option<String>,
 }
 
 // ── Cache directory ────────────────────────────────────────────────────────
@@ -66,11 +72,65 @@ pub fn cache_key(bbox: (f64, f64, f64, f64), filter: &FeatureFilter) -> String {
     format!("{hash:x}")
 }
 
+/// Build a deterministic URL-aware SHA-256 cache key from bounding box,
+/// feature filter, and Overpass endpoint.
+///
+/// The URL is canonicalized before hashing so insignificant differences such
+/// as surrounding whitespace, URL fragments, and explicit default ports do not
+/// create duplicate entries. This intentionally uses a distinct schema prefix
+/// from [`cache_key`] so endpoint-specific entries cannot collide with legacy
+/// bbox/filter-only entries.
+pub fn cache_key_for_url(
+    bbox: (f64, f64, f64, f64),
+    filter: &FeatureFilter,
+    overpass_url: &str,
+) -> String {
+    let (s, w, n, e) = bbox;
+    let source = canonical_overpass_url(overpass_url);
+    let canonical = format!(
+        "{URL_AWARE_CACHE_PREFIX}-v{URL_AWARE_CACHE_SCHEMA_VERSION}|{source}|{:.4},{:.4},{:.4},{:.4}|roads={},buildings={},water={},landuse={},railways={}",
+        s,
+        w,
+        n,
+        e,
+        u8::from(filter.roads),
+        u8::from(filter.buildings),
+        u8::from(filter.water),
+        u8::from(filter.landuse),
+        u8::from(filter.railways),
+    );
+    let hash = Sha256::digest(canonical.as_bytes());
+    format!("{hash:x}")
+}
+
+fn canonical_overpass_url(overpass_url: &str) -> String {
+    let trimmed = overpass_url.trim();
+    let Ok(mut parsed) = Url::parse(trimmed) else {
+        return trimmed.to_string();
+    };
+
+    parsed.set_fragment(None);
+    let is_default_port = matches!(
+        (parsed.scheme(), parsed.port()),
+        ("https", Some(443)) | ("http", Some(80))
+    );
+    if is_default_port {
+        let _ = parsed.set_port(None);
+    }
+
+    parsed.to_string()
+}
+
 // ── Public API ─────────────────────────────────────────────────────────────
 
 /// Return cached XML for `key`, or `None` if not present or unreadable.
 pub fn read(key: &str) -> Option<String> {
     read_from(&cache_dir(), key)
+}
+
+/// Return cached XML for `key` only when its metadata matches `overpass_url`.
+pub fn read_for_url(key: &str, overpass_url: &str) -> Option<String> {
+    read_from_for_url(&cache_dir(), key, overpass_url)
 }
 
 /// Atomically write `xml` + metadata for `key`.
@@ -81,6 +141,17 @@ pub fn write(
     xml: &str,
 ) -> Result<()> {
     write_to(&cache_dir(), key, bbox, filter, xml)
+}
+
+/// Atomically write `xml` + URL-aware metadata for `key`.
+pub fn write_for_url(
+    key: &str,
+    bbox: (f64, f64, f64, f64),
+    filter: &FeatureFilter,
+    xml: &str,
+    overpass_url: &str,
+) -> Result<()> {
+    write_to_for_url(&cache_dir(), key, bbox, filter, xml, overpass_url)
 }
 
 /// List all valid (paired) cache entries in the default cache directory.
@@ -107,12 +178,44 @@ fn read_from(dir: &std::path::Path, key: &str) -> Option<String> {
     }
 }
 
+fn read_from_for_url(dir: &std::path::Path, key: &str, overpass_url: &str) -> Option<String> {
+    let source = canonical_overpass_url(overpass_url);
+    if meta_matches_overpass_url(dir, key, &source) {
+        read_from(dir, key)
+    } else {
+        None
+    }
+}
+
 fn write_to(
     dir: &std::path::Path,
     key: &str,
     bbox: (f64, f64, f64, f64),
     filter: &FeatureFilter,
     xml: &str,
+) -> Result<()> {
+    write_to_with_overpass_url(dir, key, bbox, filter, xml, None)
+}
+
+fn write_to_for_url(
+    dir: &std::path::Path,
+    key: &str,
+    bbox: (f64, f64, f64, f64),
+    filter: &FeatureFilter,
+    xml: &str,
+    overpass_url: &str,
+) -> Result<()> {
+    let source = canonical_overpass_url(overpass_url);
+    write_to_with_overpass_url(dir, key, bbox, filter, xml, Some(source))
+}
+
+fn write_to_with_overpass_url(
+    dir: &std::path::Path,
+    key: &str,
+    bbox: (f64, f64, f64, f64),
+    filter: &FeatureFilter,
+    xml: &str,
+    overpass_url: Option<String>,
 ) -> Result<()> {
     let (s, w, n, e) = bbox;
     let xml_path = dir.join(format!("{key}.xml"));
@@ -130,11 +233,25 @@ fn write_to(
         filter: filter.clone(),
         created_at: Utc::now(),
         size_bytes,
+        overpass_url,
     };
     std::fs::write(&meta_tmp, serde_json::to_string(&meta)?)?;
     std::fs::rename(&meta_tmp, &meta_path)?;
 
     Ok(())
+}
+
+fn read_meta_from(dir: &std::path::Path, key: &str) -> Option<CacheMeta> {
+    let meta_path = dir.join(format!("{key}.meta.json"));
+    let raw = std::fs::read_to_string(&meta_path).ok()?;
+    serde_json::from_str::<CacheMeta>(&raw).ok()
+}
+
+fn meta_matches_overpass_url(dir: &std::path::Path, key: &str, canonical_url: &str) -> bool {
+    matches!(
+        read_meta_from(dir, key).and_then(|meta| meta.overpass_url),
+        Some(source) if source == canonical_url
+    )
 }
 
 fn list_areas_in(dir: &std::path::Path) -> Vec<CacheEntry> {
@@ -184,6 +301,16 @@ pub fn find_containing(bbox: (f64, f64, f64, f64), filter: &FeatureFilter) -> Op
     find_containing_in(&cache_dir(), bbox, filter)
 }
 
+/// Return cached XML for a containing entry only when its metadata matches
+/// `overpass_url`.
+pub fn find_containing_for_url(
+    bbox: (f64, f64, f64, f64),
+    filter: &FeatureFilter,
+    overpass_url: &str,
+) -> Option<String> {
+    find_containing_in_for_url(&cache_dir(), bbox, filter, overpass_url)
+}
+
 fn find_containing_in(
     dir: &std::path::Path,
     bbox: (f64, f64, f64, f64),
@@ -195,6 +322,26 @@ fn find_containing_in(
         let contained = cs <= req_s && cw <= req_w && cn >= req_n && ce >= req_e;
         let filter_matches = entry.filter == *filter;
         if contained && filter_matches {
+            return read_from(dir, &entry.key);
+        }
+    }
+    None
+}
+
+fn find_containing_in_for_url(
+    dir: &std::path::Path,
+    bbox: (f64, f64, f64, f64),
+    filter: &FeatureFilter,
+    overpass_url: &str,
+) -> Option<String> {
+    let source = canonical_overpass_url(overpass_url);
+    let (req_s, req_w, req_n, req_e) = bbox;
+    for entry in list_areas_in(dir) {
+        let [cs, cw, cn, ce] = entry.bbox;
+        let contained = cs <= req_s && cw <= req_w && cn >= req_n && ce >= req_e;
+        let filter_matches = entry.filter == *filter;
+        let source_matches = meta_matches_overpass_url(dir, &entry.key, &source);
+        if contained && filter_matches && source_matches {
             return read_from(dir, &entry.key);
         }
     }
@@ -278,6 +425,7 @@ mod tests {
             filter: FeatureFilter::default(),
             created_at,
             size_bytes: 100,
+            overpass_url: None,
         };
         // Also write a dummy .xml so clear() has both files
         std::fs::write(dir.join(format!("{key}.xml")), b"<osm/>").unwrap();
@@ -308,6 +456,71 @@ mod tests {
         let all_key = cache_key(bbox, &all_on());
         let roads_key = cache_key(bbox, &roads_only());
         assert_ne!(all_key, roads_key);
+    }
+
+    #[test]
+    fn cache_key_for_url_varies_by_overpass_url() {
+        let bbox = (51.5, -0.13, 51.52, -0.10);
+        let default_key =
+            cache_key_for_url(bbox, &all_on(), "https://overpass-api.de/api/interpreter");
+        let mirror_key = cache_key_for_url(
+            bbox,
+            &all_on(),
+            "https://overpass.kumi.systems/api/interpreter",
+        );
+        assert_ne!(default_key, mirror_key);
+    }
+
+    #[test]
+    fn cache_key_for_url_is_deterministic_for_default_url() {
+        let bbox = (51.5, -0.13, 51.52, -0.10);
+        let k1 = cache_key_for_url(bbox, &all_on(), "https://overpass-api.de/api/interpreter");
+        let k2 = cache_key_for_url(
+            bbox,
+            &all_on(),
+            " https://overpass-api.de:443/api/interpreter#ignored ",
+        );
+        assert_eq!(k1, k2);
+        assert_ne!(k1, cache_key(bbox, &all_on()));
+    }
+
+    #[test]
+    fn write_for_url_then_read_for_other_url_returns_none() {
+        let tmp = with_cache_dir();
+        let bbox = (51.5_f64, -0.13_f64, 51.52_f64, -0.10_f64);
+        let default_url = "https://overpass-api.de/api/interpreter";
+        let mirror_url = "https://overpass.kumi.systems/api/interpreter";
+        let key = cache_key_for_url(bbox, &all_on(), default_url);
+        let xml = "<osm><node id='1'/></osm>";
+
+        write_to_for_url(tmp.path(), &key, bbox, &all_on(), xml, default_url).unwrap();
+
+        assert_eq!(
+            read_from_for_url(tmp.path(), &key, default_url).as_deref(),
+            Some(xml)
+        );
+        assert!(read_from_for_url(tmp.path(), &key, mirror_url).is_none());
+    }
+
+    #[test]
+    fn find_containing_for_url_ignores_other_overpass_url() {
+        let tmp = with_cache_dir();
+        let large_bbox = (51.5_f64, -0.13_f64, 51.52_f64, -0.10_f64);
+        let small_bbox = (51.505, -0.125, 51.515, -0.105);
+        let default_url = "https://overpass-api.de/api/interpreter";
+        let mirror_url = "https://overpass.kumi.systems/api/interpreter";
+        let key = cache_key_for_url(large_bbox, &all_on(), default_url);
+        let xml = "<osm><node id='1'/></osm>";
+
+        write_to_for_url(tmp.path(), &key, large_bbox, &all_on(), xml, default_url).unwrap();
+
+        assert_eq!(
+            find_containing_in_for_url(tmp.path(), small_bbox, &all_on(), default_url).as_deref(),
+            Some(xml)
+        );
+        assert!(
+            find_containing_in_for_url(tmp.path(), small_bbox, &all_on(), mirror_url).is_none()
+        );
     }
 
     #[test]
