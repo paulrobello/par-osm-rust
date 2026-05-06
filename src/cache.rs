@@ -146,7 +146,7 @@ fn migrate_legacy_cache_dir(subdir: &str) -> Result<CacheMigrationReport> {
         return Ok(report);
     }
 
-    if !is_dir_empty(&shared_dir)? {
+    if !is_dir_empty(&shared_dir)? && subdir != "overture" {
         report.skipped_files = legacy_file_count(&legacy_dir)?;
         return Ok(report);
     }
@@ -472,6 +472,34 @@ mod tests {
         assert!(dir.join("places.meta.json").exists());
         assert!(!legacy.join("places.geojson").exists());
         assert!(!legacy.join("places.meta.json").exists());
+    }
+
+    #[test]
+    fn overture_cache_default_merges_legacy_files_into_non_empty_shared_dir() {
+        let _guard = env_lock().lock().unwrap();
+        let env = EnvSnapshot::capture();
+        isolate_cache_env(&env);
+        let tmp = TempDir::new().unwrap();
+        env.set_path("HOME", tmp.path());
+        let legacy = tmp.path().join(".cache/osm-to-bedrock/overture");
+        let shared = tmp.path().join(".cache/par-osm-rust/overture");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::create_dir_all(&shared).unwrap();
+        fs::write(legacy.join("area-a.geojson"), "legacy-a").unwrap();
+        fs::write(shared.join("area-b.geojson"), "shared-b").unwrap();
+
+        let dir = crate::overture::overture_cache_dir();
+
+        assert_eq!(dir, shared);
+        assert_eq!(
+            fs::read_to_string(dir.join("area-a.geojson")).unwrap(),
+            "legacy-a"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join("area-b.geojson")).unwrap(),
+            "shared-b"
+        );
+        assert!(!legacy.join("area-a.geojson").exists());
     }
 
     #[test]
