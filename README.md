@@ -1,8 +1,20 @@
 # par-osm-rust
 
+[![CI](https://github.com/paulrobello/par-osm-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/paulrobello/par-osm-rust/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/par-osm-rust.svg)](https://crates.io/crates/par-osm-rust)
+[![Docs.rs](https://docs.rs/par-osm-rust/badge.svg)](https://docs.rs/par-osm-rust)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Rust MSRV](https://img.shields.io/badge/rust-1.87%2B-orange.svg)](https://www.rust-lang.org)
+
 Shared Rust utilities for fetching, caching, parsing, and normalizing OpenStreetMap-compatible map data.
 
 `par-osm-rust` is the data-source crate used by `osm-to-bedrock` and `osm-world`. It owns network and cache concerns only: Overpass/OSM fetching, optional Overture Maps fetching, source merge policy, OSM XML/PBF parsing, SRTM tile downloads, and HGT elevation lookup. It intentionally does **not** depend on Minecraft, WGPU, UI, renderer, or application-specific types.
+
+```toml
+par-osm-rust = "0.1.0"
+```
+
+For local workspace development, use a path dependency instead:
 
 ```toml
 par-osm-rust = { path = "../par-osm-rust" }
@@ -227,6 +239,31 @@ fn main() -> anyhow::Result<()> {
     println!("needed tiles: {tiles:?}");
     Ok(())
 }
+```
+
+## Documentation
+
+- [Architecture](docs/ARCHITECTURE.md) - System design, module boundaries, source flow, and cache architecture.
+- [Documentation Style Guide](docs/DOCUMENTATION_STYLE_GUIDE.md) - Standards for project documentation and diagrams.
+
+## Release and publishing
+
+Publishing is manual through GitHub Actions. The workflow checks whether the current `Cargo.toml` version already exists on crates.io, runs tests unless explicitly skipped, performs `cargo publish --dry-run`, and then publishes with the `CARGO_REGISTRY_TOKEN` repository secret.
+
+Use the workflow from GitHub Actions:
+
+```text
+Actions → Publish to crates.io → Run workflow
+```
+
+Before triggering a release, verify locally:
+
+```bash
+cargo fmt -- --check
+cargo check --all-targets
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-features
+cargo publish --dry-run
 ```
 
 ## Verification
