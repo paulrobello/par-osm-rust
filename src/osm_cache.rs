@@ -69,7 +69,7 @@ pub fn cache_key(bbox: (f64, f64, f64, f64), filter: &FeatureFilter) -> String {
         u8::from(filter.railways),
     );
     let hash = Sha256::digest(canonical.as_bytes());
-    format!("{hash:x}")
+    hash.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Build a deterministic URL-aware SHA-256 cache key from bounding box,
@@ -100,7 +100,7 @@ pub fn cache_key_for_url(
         u8::from(filter.railways),
     );
     let hash = Sha256::digest(canonical.as_bytes());
-    format!("{hash:x}")
+    hash.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn canonical_overpass_url(overpass_url: &str) -> String {

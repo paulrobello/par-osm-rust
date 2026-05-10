@@ -770,7 +770,7 @@ pub fn overture_cache_key(bbox: (f64, f64, f64, f64), cli_type: &str) -> String 
     let (s, w, n, e) = bbox;
     let canonical = format!("overture|{s:.4},{w:.4},{n:.4},{e:.4}|{cli_type}");
     let hash = Sha256::digest(canonical.as_bytes());
-    format!("{hash:x}")
+    hash.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Return cached GeoJSON for `key`, or `None` if absent or unreadable.
