@@ -3,6 +3,11 @@
 //! Layout: shared Overpass cache directory with `{sha256}.xml` + `{sha256}.meta.json`.
 //! Legacy key: SHA-256 of `"v2|{s:.4},{w:.4},{n:.4},{e:.4}|roads={},buildings={},water={},landuse={},railways={}"`.
 //! URL-aware key: SHA-256 of `"overpass-url-v3|{canonical_url}|{s:.4},{w:.4},{n:.4},{e:.4}|roads={},buildings={},water={},landuse={},railways={}"`.
+//!
+//! Reads, writes, listing, and clearing delegate to the generic
+//! [`crate::cache_store::RawCache`] helper. That helper owns the QA-012
+//! atomic write protocol (meta-first, data-last) so the OSM and Overture
+//! caches share one correct implementation instead of two near-duplicates.
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -11,8 +16,28 @@ use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use url::Url;
 
+use crate::cache_store::{CacheMeta as CacheMetaTrait, RawCache};
 use crate::filter::FeatureFilter;
 
+// ── Schema versions ────────────────────────────────────────────────────────
+//
+// Two versioning schemes coexist for backward compatibility — do not conflate
+// them (QA-019). Each constant is bumped independently, only when that
+// family's key canonicalization or [`CacheMeta`] layout changes in a
+// backward-incompatible way:
+//
+// * `CACHE_SCHEMA_VERSION` (= 2) seeds the legacy bbox+filter cache key
+//   produced by [`cache_key`]. The key prefix is `v2|`. Existing legacy
+//   entries with a different prefix simply miss and re-write.
+// * `URL_AWARE_CACHE_SCHEMA_VERSION` (= 3) seeds the URL-aware cache key
+//   produced by [`cache_key_for_url`]. The key prefix is `overpass-url-v3|`.
+//   It started at 3 — deliberately ahead of the legacy family — so URL-aware
+//   keys can never collide with legacy keys (different prefix ⇒ different
+//   SHA-256 even for identical bbox/filter/URL inputs).
+//
+// The values are intentionally independent; do not "unify" them into a single
+// constant. Existing caches with stale versions always miss and re-write
+// rather than silently serving stale data.
 const CACHE_SCHEMA_VERSION: u8 = 2;
 const URL_AWARE_CACHE_SCHEMA_VERSION: u8 = 3;
 const URL_AWARE_CACHE_PREFIX: &str = "overpass-url";
@@ -22,22 +47,46 @@ const URL_AWARE_CACHE_PREFIX: &str = "overpass-url";
 /// A single entry returned by [`list_areas`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CacheEntry {
+    /// SHA-256 hex cache key the entry is stored under.
     pub key: String,
-    pub bbox: [f64; 4], // [south, west, north, east]
+    /// Bounding box `[south, west, north, east]` covered by the cached XML.
+    pub bbox: [f64; 4],
+    /// Feature filter in effect when the entry was written.
     pub filter: FeatureFilter,
+    /// UTC timestamp at which the entry was written.
     pub created_at: DateTime<Utc>,
+    /// Size of the cached XML payload in bytes.
     pub size_bytes: u64,
 }
 
 /// Serialised metadata stored alongside the `.xml` file.
 #[derive(Debug, Serialize, Deserialize)]
 struct CacheMeta {
+    /// Bounding box `[south, west, north, east]` covered by the cached XML.
     bbox: [f64; 4],
+    /// Feature filter in effect when the entry was written.
     filter: FeatureFilter,
+    /// UTC timestamp at which the entry was written.
     created_at: DateTime<Utc>,
+    /// Size of the cached XML payload in bytes.
     size_bytes: u64,
+    /// Canonical Overpass endpoint URL, present on URL-aware entries and
+    /// absent on legacy entries. Used by [`read_for_url`] /
+    /// [`find_containing_for_url`] to isolate entries written for one mirror
+    /// from another.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     overpass_url: Option<String>,
+}
+
+impl CacheMetaTrait for CacheMeta {
+    fn created_at(&self) -> DateTime<Utc> {
+        self.created_at
+    }
+}
+
+/// Build a [`RawCache`] rooted at `dir` for the Overpass XML layout.
+fn raw_cache(dir: &std::path::Path) -> RawCache<CacheMeta> {
+    RawCache::new(dir.to_path_buf(), "xml")
 }
 
 // ── Cache directory ────────────────────────────────────────────────────────
@@ -53,6 +102,18 @@ pub fn cache_dir() -> PathBuf {
 ///
 /// Coords are snapped to 4 decimal places (~11 m) so small UI drags reuse the
 /// same entry.
+///
+/// **Deprecated** (ARC-011 / QA-011): this is the legacy bbox+filter key and
+/// does not distinguish between Overpass endpoints, so an entry written for
+/// one mirror is served for another. Prefer the URL-aware
+/// [`cache_key_for_url`], which folds the (canonicalized) Overpass endpoint
+/// into the hash. The legacy family is retained for downstream compatibility
+/// with `osm-to-bedrock` / `osm-world` and will be removed in a future major
+/// release.
+#[deprecated(
+    since = "0.2.0",
+    note = "use the URL-aware `cache_key_for_url` instead; legacy keys do not isolate by Overpass endpoint"
+)]
 pub fn cache_key(bbox: (f64, f64, f64, f64), filter: &FeatureFilter) -> String {
     let (s, w, n, e) = bbox;
     let canonical = format!(
@@ -124,6 +185,15 @@ fn canonical_overpass_url(overpass_url: &str) -> String {
 // ── Public API ─────────────────────────────────────────────────────────────
 
 /// Return cached XML for `key`, or `None` if not present or unreadable.
+///
+/// **Deprecated** (ARC-011 / QA-011): this is the legacy bbox+filter read and
+/// does not check the entry's Overpass endpoint. Prefer [`read_for_url`],
+/// which gates the read on the entry's stored `overpass_url` so an entry
+/// written for one mirror is never served for another.
+#[deprecated(
+    since = "0.2.0",
+    note = "use the URL-aware `read_for_url` instead; legacy reads do not isolate by Overpass endpoint"
+)]
 pub fn read(key: &str) -> Option<String> {
     read_from(&cache_dir(), key)
 }
@@ -134,6 +204,15 @@ pub fn read_for_url(key: &str, overpass_url: &str) -> Option<String> {
 }
 
 /// Atomically write `xml` + metadata for `key`.
+///
+/// **Deprecated** (ARC-011 / QA-011): this is the legacy bbox+filter write
+/// and records no Overpass endpoint in the metadata. Prefer [`write_for_url`],
+/// which stores the canonical `overpass_url` in the sidecar so subsequent
+/// reads via [`read_for_url`] can isolate entries per mirror.
+#[deprecated(
+    since = "0.2.0",
+    note = "use the URL-aware `write_for_url` instead; legacy writes do not record the Overpass endpoint"
+)]
 pub fn write(
     key: &str,
     bbox: (f64, f64, f64, f64),
@@ -166,16 +245,14 @@ pub fn clear(min_age: Option<chrono::Duration>) -> Result<usize> {
 }
 
 // ── Internal helpers (used directly by tests via explicit path arg) ────────
+//
+// Each helper constructs a [`RawCache`] rooted at `dir` and delegates the
+// protocol (atomic write, orphan-skip read/list, age-based clear) to it.
+// Keeping the `&Path`-based private signatures preserves the public API and
+// the test helpers while collapsing the duplicated logic into one place.
 
 fn read_from(dir: &std::path::Path, key: &str) -> Option<String> {
-    let xml_path = dir.join(format!("{key}.xml"));
-    match std::fs::read_to_string(&xml_path) {
-        Ok(s) => Some(s),
-        Err(e) => {
-            log::warn!("Cache read failed for {key}: {e}");
-            None
-        }
-    }
+    raw_cache(dir).read_data(key)
 }
 
 fn read_from_for_url(dir: &std::path::Path, key: &str, overpass_url: &str) -> Option<String> {
@@ -218,15 +295,6 @@ fn write_to_with_overpass_url(
     overpass_url: Option<String>,
 ) -> Result<()> {
     let (s, w, n, e) = bbox;
-    let xml_path = dir.join(format!("{key}.xml"));
-    let meta_path = dir.join(format!("{key}.meta.json"));
-    let xml_tmp = dir.join(format!("{key}.xml.tmp"));
-    let meta_tmp = dir.join(format!("{key}.meta.json.tmp"));
-
-    // Atomic write: write to .tmp then rename
-    std::fs::write(&xml_tmp, xml)?;
-    std::fs::rename(&xml_tmp, &xml_path)?;
-
     let size_bytes = xml.len() as u64;
     let meta = CacheMeta {
         bbox: [s, w, n, e],
@@ -235,16 +303,13 @@ fn write_to_with_overpass_url(
         size_bytes,
         overpass_url,
     };
-    std::fs::write(&meta_tmp, serde_json::to_string(&meta)?)?;
-    std::fs::rename(&meta_tmp, &meta_path)?;
-
-    Ok(())
+    // Delegates to the QA-012 atomic protocol (meta first, data last) owned
+    // by [`RawCache::write`].
+    raw_cache(dir).write(key, xml, &meta)
 }
 
 fn read_meta_from(dir: &std::path::Path, key: &str) -> Option<CacheMeta> {
-    let meta_path = dir.join(format!("{key}.meta.json"));
-    let raw = std::fs::read_to_string(&meta_path).ok()?;
-    serde_json::from_str::<CacheMeta>(&raw).ok()
+    raw_cache(dir).read_meta(key)
 }
 
 fn meta_matches_overpass_url(dir: &std::path::Path, key: &str, canonical_url: &str) -> bool {
@@ -255,39 +320,17 @@ fn meta_matches_overpass_url(dir: &std::path::Path, key: &str, canonical_url: &s
 }
 
 fn list_areas_in(dir: &std::path::Path) -> Vec<CacheEntry> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut result = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        let Some(key) = name.strip_suffix(".meta.json") else {
-            continue;
-        };
-        let xml_path = dir.join(format!("{key}.xml"));
-        if !xml_path.exists() {
-            continue; // orphaned meta — skip
-        }
-        let Ok(raw) = std::fs::read_to_string(&path) else {
-            log::warn!("Skipping unreadable cache meta: {}", path.display());
-            continue;
-        };
-        let Ok(meta) = serde_json::from_str::<CacheMeta>(&raw) else {
-            log::warn!("Skipping malformed cache meta: {}", path.display());
-            continue;
-        };
-        result.push(CacheEntry {
-            key: key.to_string(),
+    raw_cache(dir)
+        .list()
+        .into_iter()
+        .map(|(key, meta)| CacheEntry {
+            key,
             bbox: meta.bbox,
             filter: meta.filter,
             created_at: meta.created_at,
             size_bytes: meta.size_bytes,
-        });
-    }
-    result
+        })
+        .collect()
 }
 
 // ── Containment lookup ─────────────────────────────────────────────────────
@@ -296,7 +339,17 @@ fn list_areas_in(dir: &std::path::Path) -> Vec<CacheEntry> {
 /// and whose filter exactly matches `filter`.
 ///
 /// Containment: cached_s ≤ req_s && cached_w ≤ req_w && cached_n ≥ req_n && cached_e ≥ req_e
-#[allow(dead_code)]
+///
+/// **Deprecated** (ARC-011 / QA-011): this is the legacy bbox+filter
+/// containment lookup and does not check the entry's Overpass endpoint.
+/// Prefer [`find_containing_for_url`], which additionally requires the
+/// entry's stored `overpass_url` to match so an entry written for one mirror
+/// is never served for another. The crate's own fetch path
+/// ([`crate::overpass`]) already uses the URL-aware family.
+#[deprecated(
+    since = "0.2.0",
+    note = "use the URL-aware `find_containing_for_url` instead; legacy lookups do not isolate by Overpass endpoint"
+)]
 pub fn find_containing(bbox: (f64, f64, f64, f64), filter: &FeatureFilter) -> Option<String> {
     find_containing_in(&cache_dir(), bbox, filter)
 }
@@ -349,53 +402,12 @@ fn find_containing_in_for_url(
 }
 
 fn clear_dir(dir: &std::path::Path, min_age: Option<chrono::Duration>) -> Result<usize> {
-    if !dir.exists() {
-        log::info!("Cache dir does not exist; nothing to clear");
-        return Ok(0);
-    }
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Ok(0);
-    };
-    let now = Utc::now();
-    let mut deleted = 0usize;
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        let Some(key) = name.strip_suffix(".meta.json") else {
-            // Remove orphaned .xml files (no paired .meta.json)
-            if let Some(stem) = name.strip_suffix(".xml") {
-                let meta_name = format!("{stem}.meta.json");
-                if !dir.join(&meta_name).exists() {
-                    let _ = std::fs::remove_file(&path);
-                }
-            }
-            continue;
-        };
-        if let Some(min_age) = min_age {
-            let Ok(raw) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            let Ok(meta) = serde_json::from_str::<CacheMeta>(&raw) else {
-                continue;
-            };
-            let age = now.signed_duration_since(meta.created_at);
-            if age <= min_age {
-                continue; // fresh — keep it
-            }
-        }
-        let xml_path = dir.join(format!("{key}.xml"));
-        let meta_path = dir.join(format!("{key}.meta.json"));
-        let _ = std::fs::remove_file(&xml_path);
-        let _ = std::fs::remove_file(&meta_path);
-        deleted += 1;
-    }
-    Ok(deleted)
+    // Delegates the age-based eviction and orphan sweep to [`RawCache::clear`].
+    raw_cache(dir).clear(min_age)
 }
 
 #[cfg(test)]
+#[allow(deprecated)] // tests intentionally exercise the legacy cache_key family for coverage
 mod tests {
     use super::*;
     use tempfile::TempDir;
@@ -614,5 +626,36 @@ mod tests {
         let small_bbox = (51.505, -0.125, 51.515, -0.105);
         let result = find_containing_in(tmp.path(), small_bbox, &roads_only());
         assert!(result.is_none()); // filter mismatch → None
+    }
+
+    #[test]
+    fn read_returns_none_for_orphan_meta_without_data() {
+        // QA-012: under the meta-first atomic protocol, a crash before the
+        // final data rename leaves meta-without-data. `read_from` must treat
+        // that as a miss (the data file is absent), and `list_areas_in` must
+        // skip it.
+        let tmp = with_cache_dir();
+        let key = "orphankey0000000000000000000000000000000000000000000000000000ff";
+
+        // Hand-write only the meta sidecar — no .xml data file.
+        let meta = CacheMeta {
+            bbox: [51.5, -0.13, 51.52, -0.10],
+            filter: FeatureFilter::default(),
+            created_at: Utc::now(),
+            size_bytes: 42,
+            overpass_url: None,
+        };
+        let meta_path = tmp.path().join(format!("{key}.meta.json"));
+        std::fs::write(&meta_path, serde_json::to_string(&meta).unwrap()).unwrap();
+
+        assert!(
+            read_from(tmp.path(), key).is_none(),
+            "meta-without-data orphan must miss on read"
+        );
+        let listed = list_areas_in(tmp.path());
+        assert!(
+            listed.iter().all(|e| e.key != key),
+            "meta-without-data orphan must not appear in list_areas_in"
+        );
     }
 }

@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::cache_store::{CacheMeta as CacheMetaTrait, RawCache};
 use crate::osm::{FeatureSource, OsmData, OsmNode, OsmPoiNode, OsmWay};
 use crate::synthetic_ids::OvertureIdAllocator;
 
@@ -979,7 +980,28 @@ pub struct OvertureCacheMeta {
     pub cli_version: String,
 }
 
+impl CacheMetaTrait for OvertureCacheMeta {
+    fn created_at(&self) -> DateTime<Utc> {
+        self.created_at
+    }
+}
+
+/// Build a [`RawCache`] rooted at `dir` for the Overture GeoJSON layout.
+///
+/// The Overture and Overpass caches share the same atomic write protocol and
+/// orphan-skip read/list via [`RawCache`]; this helper fixes the extension
+/// (`.geojson`) and metadata type ([`OvertureCacheMeta`]).
+fn raw_cache(dir: &Path) -> RawCache<OvertureCacheMeta> {
+    RawCache::new(dir.to_path_buf(), "geojson")
+}
+
 /// Return the Overture GeoJSON cache directory, creating it if needed.
+///
+/// Thin re-export of [`crate::cache::overture_cache_dir`] (DOC-014) preserved
+/// for ergonomic `overture::overture_cache_dir()` call sites. The canonical
+/// definition lives in [`crate::cache`]; both paths resolve to the same
+/// directory and the duplication is intentional so callers that already
+/// `use crate::overture` need not also import [`crate::cache`].
 ///
 /// Priority:
 /// 1. `PAR_OSM_OVERTURE_CACHE_DIR` environment variable
@@ -1044,12 +1066,9 @@ pub fn overture_cache_key_with_version(
 /// a missing/unreadable/expired meta file, or a missing geojson file all
 /// yield `None` (treated as a miss → caller re-fetches).
 pub fn overture_cache_read(dir: &Path, key: &str, ttl: Option<Duration>) -> Option<String> {
-    let path = dir.join(format!("{key}.geojson"));
+    let cache = raw_cache(dir);
     if let Some(ttl) = ttl {
-        let meta_path = dir.join(format!("{key}.meta.json"));
-        let meta = std::fs::read_to_string(&meta_path)
-            .ok()
-            .and_then(|raw| serde_json::from_str::<OvertureCacheMeta>(&raw).ok());
+        let meta = cache.read_meta(key);
         let created_at = match meta {
             Some(m) => m.created_at,
             None => {
@@ -1079,18 +1098,17 @@ pub fn overture_cache_read(dir: &Path, key: &str, ttl: Option<Duration>) -> Opti
             }
         }
     }
-    match std::fs::read_to_string(&path) {
-        Ok(s) => Some(s),
-        Err(e) => {
-            log::debug!("Overture cache miss for {key}: {e}");
-            None
-        }
-    }
+    cache.read_data(key)
 }
 
 /// Atomically write `geojson` + metadata for `key` (ARC-001: stores
 /// `cli_version` in the meta sidecar so TTL lookups can be paired with the
 /// version that wrote the entry).
+///
+/// Delegates to [`RawCache::write`], which owns the QA-012 atomic protocol
+/// (meta sidecar finalized first, data renamed last). The committed/visible
+/// state is "both files present"; a crash before the final data rename leaves
+/// meta-without-data, which [`overture_cache_read`] treats as a miss.
 pub fn overture_cache_write(
     dir: &Path,
     key: &str,
@@ -1100,15 +1118,6 @@ pub fn overture_cache_write(
     geojson: &str,
 ) -> Result<()> {
     let (s, w, n, e) = bbox;
-    let geojson_path = dir.join(format!("{key}.geojson"));
-    let meta_path = dir.join(format!("{key}.meta.json"));
-    let geojson_tmp = dir.join(format!("{key}.geojson.tmp"));
-    let meta_tmp = dir.join(format!("{key}.meta.json.tmp"));
-
-    // Atomic write: write to .tmp then rename
-    std::fs::write(&geojson_tmp, geojson)?;
-    std::fs::rename(&geojson_tmp, &geojson_path)?;
-
     let size_bytes = geojson.len() as u64;
     let meta = OvertureCacheMeta {
         bbox: [s, w, n, e],
@@ -1117,10 +1126,7 @@ pub fn overture_cache_write(
         size_bytes,
         cli_version: cli_version.to_string(),
     };
-    std::fs::write(&meta_tmp, serde_json::to_string(&meta)?)?;
-    std::fs::rename(&meta_tmp, &meta_path)?;
-
-    Ok(())
+    raw_cache(dir).write(key, geojson, &meta)
 }
 
 /// A single Overture cache entry returned by [`list_overture_areas`]
@@ -1144,40 +1150,23 @@ pub struct OvertureCacheEntry {
 }
 
 /// List all valid Overture cache entries.
+///
+/// Delegates to [`RawCache::list`], which skips orphans (meta without data,
+/// the QA-012 post-crash shape; or data without meta, the legacy shape).
 pub fn list_overture_areas() -> Vec<OvertureCacheEntry> {
     let dir = overture_cache_dir();
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Vec::new();
-    };
-    let mut result = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        let Some(key) = name.strip_suffix(".meta.json") else {
-            continue;
-        };
-        let geojson_path = dir.join(format!("{key}.geojson"));
-        if !geojson_path.exists() {
-            continue;
-        }
-        let Ok(raw) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(meta) = serde_json::from_str::<OvertureCacheMeta>(&raw) else {
-            continue;
-        };
-        result.push(OvertureCacheEntry {
-            key: key.to_string(),
+    raw_cache(&dir)
+        .list()
+        .into_iter()
+        .map(|(key, meta)| OvertureCacheEntry {
+            key,
             bbox: meta.bbox,
             cli_type: meta.cli_type,
             created_at: meta.created_at,
             size_bytes: meta.size_bytes,
             cli_version: meta.cli_version,
-        });
-    }
-    result
+        })
+        .collect()
 }
 
 /// Clear Overture cache entries, optionally only those older than `min_age`.
@@ -1188,50 +1177,8 @@ pub fn clear_overture_cache(min_age: Option<chrono::Duration>) -> Result<usize> 
 }
 
 fn clear_overture_cache_dir(dir: &Path, min_age: Option<chrono::Duration>) -> Result<usize> {
-    if !dir.exists() {
-        log::info!("Overture cache dir does not exist; nothing to clear");
-        return Ok(0);
-    }
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Ok(0);
-    };
-    let now = Utc::now();
-    let mut deleted = 0usize;
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        let Some(key) = name.strip_suffix(".meta.json") else {
-            // Remove orphaned .geojson files (no paired .meta.json)
-            if let Some(stem) = name.strip_suffix(".geojson") {
-                let meta_name = format!("{stem}.meta.json");
-                if !dir.join(&meta_name).exists() {
-                    let _ = std::fs::remove_file(&path);
-                }
-            }
-            continue;
-        };
-        if let Some(min_age) = min_age {
-            let Ok(raw) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            let Ok(meta) = serde_json::from_str::<OvertureCacheMeta>(&raw) else {
-                continue;
-            };
-            let age = now.signed_duration_since(meta.created_at);
-            if age <= min_age {
-                continue; // fresh — keep it
-            }
-        }
-        let geojson_path = dir.join(format!("{key}.geojson"));
-        let meta_path = dir.join(format!("{key}.meta.json"));
-        let _ = std::fs::remove_file(&geojson_path);
-        let _ = std::fs::remove_file(&meta_path);
-        deleted += 1;
-    }
-    Ok(deleted)
+    // Delegates age-based eviction and orphan sweep to [`RawCache::clear`].
+    raw_cache(dir).clear(min_age)
 }
 
 // ── High-level fetch API ──────────────────────────────────────────────────

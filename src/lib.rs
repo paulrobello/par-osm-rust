@@ -55,8 +55,10 @@
 //! - [`osm`] parses PBF/XML and writes normalized OSM XML.
 //! - [`srtm`] and [`elevation`] download/read HGT elevation data.
 //! - [`cache`] resolves shared cache directories and migrates legacy caches.
+//! - [`cache_store`] provides the generic raw-payload disk cache ([`cache_store::RawCache`]) shared by [`osm_cache`] and [`overture`].
 
 pub mod cache;
+pub mod cache_store;
 pub mod elevation;
 pub mod filter;
 pub mod osm;
