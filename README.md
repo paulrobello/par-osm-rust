@@ -11,13 +11,19 @@ Shared Rust utilities for fetching, caching, parsing, and normalizing OpenStreet
 `par-osm-rust` is the data-source crate used by `osm-to-bedrock` and `osm-world`. It owns network and cache concerns only: Overpass/OSM fetching, optional Overture Maps fetching, source merge policy, OSM XML/PBF parsing, SRTM tile downloads, and HGT elevation lookup. It intentionally does **not** depend on Minecraft, WGPU, UI, renderer, or application-specific types.
 
 ```toml
-par-osm-rust = "0.1.0"
+par-osm-rust = "0.2.0"
 ```
 
 For local workspace development, use a path dependency instead:
 
 ```toml
 par-osm-rust = { path = "../par-osm-rust" }
+```
+
+Consumers that want only the pure subset (data model, parsing, writing, cache I/O, filter, synthetic IDs, elevation) without the blocking `reqwest` fetch surface can disable default features:
+
+```toml
+par-osm-rust = { version = "0.2.0", default-features = false }
 ```
 
 ## What it provides
@@ -35,8 +41,8 @@ par-osm-rust = { path = "../par-osm-rust" }
   - Configurable Overture failure behavior: graceful OSM fallback by default, or strict failure.
   - POI dedupe for near-duplicate OSM/Overture points, preferring Overture representatives.
 - **Parsing / serialization**
-  - OSM PBF parsing.
-  - OSM XML parsing for nodes, ways, relations, POIs, addresses, trees, and bounds.
+  - OSM PBF parsing (`osm::parse_pbf`).
+  - OSM XML parsing from a string (`osm::parse_osm_xml_str`) or a streaming file path (`osm::parse_osm_xml_file`) for nodes, ways, relations, POIs, addresses, trees, and bounds.
   - Normalized OSM XML writing via `osm::write_osm_xml_string`.
 - **Elevation**
   - SRTM tile naming, download, cache lookup, and HGT elevation sampling.
@@ -92,7 +98,7 @@ fn main() -> anyhow::Result<()> {
     let bbox = (38.0, -121.0, 38.01, -120.99);
     let url = overpass::default_overpass_url();
     let data = overpass::fetch_osm_data(bbox, &FeatureFilter::default(), true, url)?;
-    println!("ways: {}", data.ways.len());
+    println!("ways: {}", data.iter_ways().count());
     Ok(())
 }
 ```
@@ -109,6 +115,24 @@ fn main() -> anyhow::Result<()> {
 - `OvertureFailureMode::FallbackToOsm`
 
 Important nuance: `PoiSourceMode::OverturePreferred` is the default policy, but Overture is fetched only when `SourceOptions.overture.enabled == true`. With default options, `fetch_map_data` performs an OSM/Overpass fetch only.
+
+`OvertureParams::default()` field values:
+
+| Field | Default | Notes |
+| --- | --- | --- |
+| `enabled` | `false` | Overture is never fetched unless this is `true`. |
+| `themes` | `OvertureTheme::all()` | Every supported theme. |
+| `priority` | empty map | Per-theme source priority; missing entries resolve to `ThemePriority::Both` via `priority_for(theme)`. |
+| `timeout_secs` | `120` | Per `overturemaps download` CLI invocation timeout. |
+| `cache_ttl_secs` | `None` | `None` selects the ~30-day default TTL, `Some(0)` disables the Overture cache, any other `Some(secs)` is honored verbatim. |
+
+`ThemePriority` controls which source wins when OSM and Overture both cover the same **non-POI** theme (POIs go through the `PoiSourceMode` policy above):
+
+| Variant | Behavior |
+| --- | --- |
+| `Overture` | Prefer Overture features for this theme. |
+| `Osm` | Prefer OSM/Overpass features for this theme. |
+| `Both` | Keep features from both sources. This is the default when a theme is not present in `priority`. |
 
 POI source modes:
 
@@ -137,6 +161,8 @@ python -m pip install overturemaps
 ```
 
 Use `overture::is_cli_available()` to check availability before presenting Overture options in an application UI. If callers use `sources::fetch_map_data` with `OvertureFailureMode::FallbackToOsm`, a missing or failing CLI becomes a warning and OSM data is returned.
+
+Set the `PAR_OSM_OVERTURE_CLI` environment variable to an absolute path to pin a specific `overturemaps` executable instead of relying on PATH lookup (useful in multi-user setups).
 
 ## Cache locations
 
@@ -194,14 +220,23 @@ Raw Overpass cache entries are keyed by:
 - `FeatureFilter`, and
 - canonical Overpass endpoint URL.
 
-Use `osm_cache::cache_key_for_url`, `read_for_url`, `write_for_url`, and `find_containing_for_url` for endpoint-aware raw XML cache operations. The legacy `cache_key`, `read`, `write`, and `find_containing` APIs remain available for backwards compatibility, but new endpoint-aware fetch paths should use the URL-aware helpers.
+Use `osm_cache::cache_key_for_url`, `read_for_url`, `write_for_url`, and `find_containing_for_url` for endpoint-aware raw XML cache operations. The legacy `cache_key`, `read`, `write`, and `find_containing` APIs remain available (now `#[deprecated]`) for backwards compatibility, but new endpoint-aware fetch paths should use the URL-aware helpers.
+
+### Listing and clearing cached areas
+
+Two free functions enumerate or evict entries in the default Overpass XML cache directory without touching override directories:
+
+- `osm_cache::list_areas() -> Vec<CacheEntry>` returns every valid (paired data + metadata) entry with its bbox, filter, timestamp, and size.
+- `osm_cache::clear(min_age: Option<chrono::Duration>) -> Result<usize>` deletes entries older than `min_age` (or all entries when `None`) and returns the count removed.
+
+The Overture cache has the equivalent `overture::list_overture_areas()` and `overture::clear_overture_cache(min_age)` helpers.
 
 ## Normalized OSM data model
 
-The central type is `osm::OsmData`. The `ways` and `ways_by_id` fields are coupled (every way has exactly one entry in the index mapping its OSM id to its position) and are encapsulated: construction goes through [`osm::OsmData::new`] and incremental mutation through [`osm::OsmData::push_way`], so external code cannot put the pair out of sync. Accessors:
+The central type is `osm::OsmData`. The `ways` and `ways_by_id` fields are coupled (every way has exactly one entry in the index mapping its OSM id to its position) and are encapsulated: construction goes through [`osm::OsmData::new`] and incremental mutation through [`osm::OsmData::push_way`], so external code cannot put the pair out of sync. `OsmWay` carries its own `id: i64` field, so the index stays consistent without an inverse lookup. Accessors:
 
-- `new(nodes, ways_with_ids, relations, bounds, poi_nodes, addr_nodes, tree_nodes)` constructs an `OsmData` and seeds `ways_by_id` from the `(id, way)` pairs.
-- `push_way(id, way)` appends a way and updates `ways_by_id` atomically.
+- `new(nodes, ways, relations, bounds, poi_nodes, addr_nodes, tree_nodes)` constructs an `OsmData` and seeds `ways_by_id` from each way's `id`.
+- `push_way(way)` appends a way and updates `ways_by_id` atomically.
 - `iter_ways()` borrows the ways slice in insertion order.
 - `way_id_at(index)` recovers a way's OSM id by index.
 - `validate_invariants()` verifies the `ways` / `ways_by_id` pair (called automatically in debug builds from `new`/`push_way`).
@@ -218,25 +253,44 @@ Top-level collections:
 
 `osm::FeatureSource` tracks whether normalized features came from OSM, Overture, or synthetic generation. This is especially useful for POI merge/dedupe behavior.
 
-When serializing prepared data for another consumer, use:
+### Parsing OSM data
+
+Three parse entry points produce an `OsmData`, differing only in input source and memory profile:
+
+| Function | Input | Notes |
+| --- | --- | --- |
+| `osm::parse_pbf(path: &Path)` | Binary `.osm.pbf` | Memory-maps the file via `osmpbf`; suitable for planet extracts. |
+| `osm::parse_osm_xml_str(xml: &str)` | XML string | Single-pass parser; collects nodes, ways, and relations in one `read_event` loop. |
+| `osm::parse_osm_xml_file(path: impl AsRef<Path>)` | `.osm` file path | Streams via `BufReader` instead of loading the whole document into memory, bounding peak memory on large extracts. |
+
+All three populate nodes, ways, relations, bounds, POIs, addresses, and trees. The XML parsers handle Overpass/OSM-style XML where ways and relations may reference previously parsed node/way IDs.
+
+When serializing prepared data for another consumer, use `osm::write_osm_xml_string(&data) -> String`. The writer validates that every `<nd ref>` resolves to a known node, so it cannot emit dangling references.
 
 ```rust,no_run
-fn write_prepared(data: &par_osm_rust::osm::OsmData) -> std::io::Result<()> {
-    let xml = par_osm_rust::osm::write_osm_xml_string(data);
+use par_osm_rust::osm;
+use std::path::Path;
+
+fn write_prepared(data: &osm::OsmData) -> std::io::Result<()> {
+    let xml = osm::write_osm_xml_string(data);
     std::fs::write("prepared.osm", xml)
+}
+
+fn load_extract(path: &str) -> anyhow::Result<osm::OsmData> {
+    // Streams from disk — bounded memory regardless of file size.
+    osm::parse_osm_xml_file(path)
 }
 ```
 
-The XML parser handles nodes, ways, relation members, bounds, tags, POIs, addresses, and trees. It is designed for Overpass/OSM-style XML, including data where ways and relations may require lookup by previously parsed node/way IDs.
-
 ## SRTM elevation
 
+`srtm` resolves and downloads HGT tiles for a bounding box; `elevation::ElevationData` samples elevations from already-downloaded tiles. The two modules are intentionally independent — callers decide whether terrain is required for their workload.
+
 ```rust,no_run
-use par_osm_rust::srtm;
+use par_osm_rust::{elevation::ElevationData, srtm};
 
 fn main() -> anyhow::Result<()> {
-    let bbox = (38.0, -121.0, 38.01, -120.99);
-    let tiles = srtm::tiles_for_bbox(bbox.0, bbox.1, bbox.2, bbox.3);
+    let bbox = (38.0, -121.0, 38.01, -120.99); // south, west, north, east
     srtm::download_tiles_for_bbox(
         bbox.0,
         bbox.1,
@@ -245,10 +299,18 @@ fn main() -> anyhow::Result<()> {
         &srtm::cache_dir(),
         &|_, _, _| {},
     )?;
-    println!("needed tiles: {tiles:?}");
+
+    // Load one tile or a directory of .hgt files, then sample bilinearly.
+    let elev = ElevationData::from_path(&srtm::cache_dir())?;
+    match elev.elevation_at(38.005, -120.995) {
+        Some(meters) => println!("ground elevation: {meters} m"),
+        None => println!("no tile covers this point or samples are void"),
+    }
     Ok(())
 }
 ```
+
+`ElevationData::from_path` accepts a single `.hgt` file or a directory containing multiple `.hgt` files (non-recursive scan); tiles outside the queried region are simply absent from the lookup. `elevation_at(lat, lon)` returns `None` when no tile covers the point or the underlying samples are void.
 
 ## Documentation
 
@@ -277,10 +339,26 @@ cargo publish --dry-run
 
 ## Verification
 
+The canonical local gate is `make checkall` — it mirrors what CI runs on every push and pull request:
+
 ```bash
-cargo fmt -- --check
-cargo check --all-targets
-cargo clippy --all-targets -- -D warnings
-cargo test
-cargo doc --no-deps
+make checkall
 ```
+
+`checkall` (see `Makefile`) runs four steps in order and fails on the first error:
+
+| Step | Target | What it runs |
+| --- | --- | --- |
+| Format check | `fmt-check` | `cargo fmt -- --check` |
+| Lint | `lint` | `cargo clippy --all-targets --all-features -- -D warnings` |
+| Type-check | `typecheck` | `cargo check --all-targets` |
+| Tests | `test` | `cargo test --all-features` |
+
+The individual targets (`make test`, `make lint`, `make fmt-check`, `make typecheck`) are available when you want to re-run just one step. Note that `make test` runs `cargo test --all-features` — stronger than bare `cargo test`, which would skip `#[cfg(feature = "blocking")]` tests.
+
+CI (`.github/workflows/ci.yml`) runs the `checkall` equivalents across an ubuntu/macos/windows matrix and adds jobs that are impractical to run locally on every save:
+
+- **MSRV check** — `cargo check --all-targets` on toolchain `1.87.0` (the declared MSRV in `Cargo.toml`).
+- **Docs** — `cargo doc --no-deps --all-features` with `RUSTDOCFLAGS=-D warnings`.
+- **Security audit** — `cargo audit` against a regenerated `Cargo.lock`.
+- **Docs lint** — markdownlint-cli2 over `README.md` and `docs/`, plus lychee link-checking the same paths.

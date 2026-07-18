@@ -9,71 +9,159 @@ Released versions are published to [crates.io](https://crates.io/crates/par-osm-
 
 ## [Unreleased]
 
-Audit-remediation wave landing ahead of the planned `0.2.0` bump. Items are
-grouped by Keep-a-Changelog section. **Breaking changes** are tagged inline and
-collected under **Changed** and **Removed**; they are the reason the next
-release will be `0.2.0` rather than a patch.
+No changes since 0.2.0.
+
+## [0.2.0] - 2026-07-18
+
+Audit-remediation release. The `0.1.2` version was never published (crates.io
+remained on `0.1.1`), so every change since `0.1.1` — the audit remediation
+plus the structural work that was staged as `0.1.2` — is folded into this
+single `0.2.0` entry. Items are grouped by Keep-a-Changelog section; breaking
+changes are tagged **Breaking —** inline and require downstream `osm-to-bedrock`
+/ `osm-world` to adapt.
 
 ### Added
 
-- Pre-commit configuration (`.pre-commit-config.yaml`) wiring `gitleaks`,
-  `detect-private-key`, and the Make-backed `fmt` / `lint` / `typecheck` hooks.
-- Expanded CI: an MSRV-check job (verified against the declared `1.87`), a
-  `cargo doc --no-deps -D rustdoc::broken_intra_doc_links` job, and a
-  `cargo audit` job for vulnerable transitive dependencies.
-- New `OsmData` accessors exposing the encapsulated ways index without letting
-  external code put it out of sync: `OsmData::new`, `push_way`, `iter_ways`,
-  `way_id_at`, and `validate_invariants` (the last is called automatically in
-  debug builds).
+- **Overture cache version + TTL (ARC-001).** `OvertureCacheMeta` now records
+  the `overturemaps` CLI version that wrote each entry and a written-at
+  timestamp, and the CLI version is folded into the cache key so a CLI upgrade
+  invalidates older entries. `OvertureParams.cache_ttl_secs` configures the
+  freshness window (`None` selects the default ~30-day TTL, `Some(0)` disables
+  the cache, any other `Some(secs)` is honored verbatim).
+- **Centralized, deterministic synthetic IDs (ARC-004 / ARC-009 / QA-010 /
+  QA-013).** A new `synthetic_ids` module owns the named negative-ID ranges
+  used by both the XML writer and the Overture parser, with a compile-time
+  assertion that the ranges do not overlap. Overture parsing is now
+  deterministic: two parses of the same GeoJSON yield the same IDs.
+- **Streaming `parse_osm_xml_file` (ARC-013).** Reads large `.osm` files via a
+  `quick-xml` `BufReader` instead of loading the whole document into memory,
+  bounding peak memory on 200 MB urban extracts.
+- **Single-pass XML parser (ARC-006).** `parse_osm_xml_str` collects nodes,
+  ways, and relations in one `read_event` loop instead of tokenizing the whole
+  document twice, and now applies an explicit element-depth limit (SEC-004).
+- **O(n·k) POI dedupe (ARC-002 / QA-002 / QA-014).**
+  `dedupe_pois_with_overture_preference` snaps each POI to a ~25 m spatial grid
+  and compares against the cell and its eight neighbors, replacing the previous
+  O(n²) nested loop. `poi_duplicates` borrows instead of allocating per
+  comparison.
+- **O(1) way-id writer lookup (ARC-003 / QA-001).** `write_osm_xml_string`
+  builds a one-shot inverse index before iterating ways, replacing the per-way
+  linear scan of `ways_by_id` (previously O(W²)).
+- **`OsmData` encapsulation accessors.** `OsmData::new`, `push_way`,
+  `iter_ways`, `way_id_at`, and `validate_invariants` expose the encapsulated
+  ways index without letting external code put it out of sync. The last runs
+  automatically under `debug_assertions` from `new` / `push_way`.
+- **Generic `RawCache<Meta>` helper (QA-003).** The shared atomic
+  write-then-rename cache protocol is extracted into
+  `cache_store::RawCache`, used by both `osm_cache` and the Overture cache so
+  the fix lives in one place.
+- **CI hardening (ARC-014 / ARC-021 / DOC-016).** CI now runs an MSRV-check job
+  (pinned to the declared `1.87`), a `cargo doc --no-deps -D warnings` job, a
+  `cargo audit` job, a docs-lint job (markdownlint-cli2 + lychee), and an
+  ubuntu/macos/windows matrix for the lint and test jobs.
+- **CHANGELOG.md and CONTRIBUTING.md (DOC-002 / DOC-003).**
+- **Criterion-ready Makefile target (`make bench`) and `.pre-commit-config.yaml`
+  wiring `gitleaks` + `detect-private-key` + the Make-backed `fmt` / `lint` /
+  `typecheck` hooks (ARC-015 / SEC-009).**
 
 ### Changed
 
-- **Breaking — `OsmData` API.** `OsmData` fields are no longer all `pub`.
+- **Breaking — `OsmData` API (ARC-008).** `OsmData` fields are now `pub(crate)`.
   Construction goes through `OsmData::new` and incremental mutation through
   `push_way`, so the `ways` / `ways_by_id` invariant can no longer be broken by
   external callers. Downstream code that constructed `OsmData` with struct
   literals or mutated `ways` directly must migrate to the new constructors and
   accessors.
-- **Breaking — cache migration is now explicit.** The `overpass_cache_dir`,
-  `srtm_cache_dir`, and `overture_cache_dir` getters (and the
-  `osm_cache::cache_dir` / `srtm::cache_dir` wrappers) are pure path resolution
-  and never move files. Consumers **must** call `cache::migrate_legacy_caches`
-  once at startup to relocate legacy `osm-to-bedrock` caches. Migration still
-  targets the shared default location and never touches `PAR_OSM_*_CACHE_DIR` /
-  `*_CACHE_DIR` override directories.
-- **Breaking — Cargo feature flags.** Fetch modules now sit behind
-  `default = ["blocking"]`. Async-only consumers can opt out with
-  `default-features = false`. Downstream manifests that rely on the implicit
-  fetch surface must add the `blocking` feature (on by default).
-- Performance: `dedupe_pois_with_overture_preference` now uses a spatial grid
-  (snap to ~25 m cell, compare against the cell and its eight neighbors) instead
-  of the previous O(n²) nested loop, and `poi_duplicates` borrows instead of
-  allocating per comparison.
-- Performance: `parse_osm_xml_str` is now single-pass — nodes, ways, and
-  relations are collected in one `read_event` loop instead of tokenizing the
-  whole document twice.
-- Performance: `write_osm_xml_string` builds a one-shot inverse
-  `HashMap<usize, i64>` before iterating ways, replacing the per-way linear
-  scan of `ways_by_id` (previously O(W²)).
+- **Breaking — `OsmWay` gained a required `id` field (QA-021).** Every way now
+  carries its OSM id, which lets `push_way` update `ways_by_id` in O(1) and
+  obsoletes the writer's inverse-lookup reverse scan. Downstream construction
+  of `OsmWay` must supply the id.
+- **Breaking — cache migration is now explicit (ARC-005 / QA-008).** The
+  `overpass_cache_dir`, `srtm_cache_dir`, and `overture_cache_dir` getters (and
+  the `osm_cache::cache_dir` / `srtm::cache_dir` wrappers) are now pure path
+  resolution and never move files. Consumers **must** call
+  `cache::migrate_legacy_caches` once at startup to relocate legacy
+  `osm-to-bedrock` caches. Migration still targets the shared default location
+  regardless of any `PAR_OSM_*_CACHE_DIR` / `*_CACHE_DIR` override; override
+  directories are never touched.
+- **Breaking — Cargo feature flags (ARC-012).** A `blocking` feature (default
+  on) now gates the `reqwest`-based fetch surface — the `overpass` and `srtm`
+  modules plus the Overture CLI orchestration in `overture::cli`. Consumers
+  wanting only the pure subset (data model, parsing, writing, cache I/O,
+  filter, synthetic IDs, elevation) opt out with `default-features = false`.
+- **Breaking — `default_overpass_url` return type.** Now returns
+  `Cow<'static, str>` instead of leaking a `Box<str>` (ARC-010 follow-up).
+- **Breaking — Overture cache API.** `overture_cache_key_with_version`,
+  `overture_cache_read`, and `overture_cache_write` gained `cli_version` and
+  `ttl` parameters to support the version/TTL awareness (ARC-001).
+- **Module split (ARC-007 / QA-009).** `osm.rs` is split into
+  `osm/{model,pbf,xml_parse,xml_write}.rs` and `overture.rs` into
+  `overture/{theme,parse,cache,cli}.rs`. All original `crate::osm::*` and
+  `crate::overture::*` paths continue to resolve via re-exports, so external
+  call sites are unaffected.
+- **Atomic meta-first cache writes (QA-012).** The shared `RawCache` write
+  protocol writes metadata first and finalizes the data file last, so a crash
+  no longer leaves an orphan data file that `read` would return but `list`
+  skips.
+- **Windows `LOCALAPPDATA` precedence (QA-020).** `platform_cache_root` prefers
+  `LOCALAPPDATA` over `HOME` on Windows, matching native Windows app
+  conventions instead of the MSYS/Cygwin/Git-Bash `HOME`.
+- **Live `OVERPASS_URL` read (ARC-010 / QA-017).** `default_overpass_url` reads
+  the env var on each call rather than freezing it at first use inside a
+  `OnceLock`.
+- **`missing_docs` enforced (DOC-007).** Every public item now carries a doc
+  comment, `#![warn(missing_docs)]` is enabled, and the crate carries
+  `#![doc(html_root_url = "https://docs.rs/par-osm-rust/0.2.0")]` so docs.rs
+  renders the README front page (DOC-012).
 
 ### Fixed
 
-- Overpass `reqwest` clients are now built with
-  `redirect(reqwest::redirect::Policy::none())`. The previous default followed
-  up to ten redirects, allowing an allowlisted mirror to bypass the host
-  allowlist via a `302` to an internal host. Any `3xx` is now treated as an
-  error.
-- Overpass error bodies are now capped before being surfaced into the `anyhow`
-  error chain, preventing an unbounded response body from being held in memory
-  or logged.
+- **Overpass redirect following (SEC-002).** Overpass `reqwest` clients are
+  built with `redirect(reqwest::redirect::Policy::none())`. The previous
+  default followed up to ten redirects, allowing an allowlisted mirror to
+  bypass the `validate_overpass_url` SSRF host allowlist via a `302` to an
+  internal host. Any `3xx` is now treated as an error.
+- **Overpass error bodies capped (SEC-005).** Surfaced Overpass error bodies
+  are truncated before entering the `anyhow` error chain, preventing an
+  unbounded response body from being held in memory or logged.
+- **SRTM redirect policy (SEC-003).** The SRTM downloader also sets
+  `redirect(Policy::none())` for consistency; the download URL remains a
+  hardcoded constant plus an integer-derived tile name, so the redirect
+  surface was already bounded.
+- **Overpass port pinned to 443 (SEC-011).** `validate_overpass_url` rejects
+  non-443 ports on allowlisted hosts so an attacker controlling a mirror
+  cannot redirect to an alternate port on the same host.
+- **`reqwest::blocking::Client` pooling (ARC-020).** Overpass and SRTM reuse a
+  pooled client instead of rebuilding one per fetch.
+- **Dangling-node-ref writer validation (ARC-016).** The XML writer rejects
+  ways that reference absent node IDs instead of silently emitting `<nd ref>`
+  entries that produce structurally invalid XML on round-trip.
+- **Cache migration symlink-skip + streamed `files_equal` (SEC-006 / QA-016).**
+  Migration uses `symlink_metadata` and skips symlinks (closing a local
+  data-exfil / OOM vector via crafted symlink targets), and `files_equal`
+  streams both files with early exit instead of loading them fully into memory.
+- **Overture CLI argument-injection guard (SEC-012).** `fetch_geojson_for_type`
+  rejects `cli_type` values starting with `-` or containing whitespace. A new
+  `PAR_OSM_OVERTURE_CLI` environment variable lets callers pin an absolute
+  `overturemaps` executable path, closing a PATH-lookup hijack vector in
+  multi-user setups (SEC-010).
 
 ### Security
 
-- Closed the redirect-following gap that undermined the
-  `validate_overpass_url` SSRF allowlist (see **Fixed**).
+- Closed the redirect-following gap that undermined the `validate_overpass_url`
+  SSRF allowlist (SEC-002; see **Fixed**), pinned the Overpass port to 443
+  (SEC-011), and disabled SRTM redirect following (SEC-003).
 - Added `.claude/settings.local.json`, `.env`, `*.pem`, `*.key`, and
-  `secrets.*` to `.gitignore` as defense-in-depth, and wired `gitleaks` into
-  pre-commit so credentials cannot be committed silently.
+  `secrets.*` to `.gitignore` as defense-in-depth (SEC-001 / SEC-009), and
+  wired `gitleaks` + `detect-private-key` into pre-commit so credentials
+  cannot be committed silently inside a larger change.
+
+### Removed
+
+- Nothing was removed. The legacy `osm_cache` family (`cache_key`, `read`,
+  `write`, `find_containing`) is now `#[deprecated]` (ARC-011 / QA-011) in
+  favor of the URL-aware `*_for_url` family, so existing call sites keep
+  working with a warning rather than breaking.
 
 ## [0.1.1] - 2026-05-10
 
@@ -102,6 +190,7 @@ OSM XML/PBF parsing, normalized `OsmData` interchange, SRTM tile download, HGT
 elevation sampling, atomic write-then-rename cache discipline, and the
 `sources::fetch_map_data` orchestration entry point.
 
-[Unreleased]: https://github.com/paulrobello/par-osm-rust/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/paulrobello/par-osm-rust/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/paulrobello/par-osm-rust/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/paulrobello/par-osm-rust/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/paulrobello/par-osm-rust/releases/tag/v0.1.0
