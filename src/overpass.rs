@@ -1,6 +1,8 @@
 // src/overpass.rs
 //! Overpass API integration: QL query builder and HTTP fetch.
 
+use std::borrow::Cow;
+
 use anyhow::{Result, bail};
 use reqwest::header::{CONTENT_TYPE, USER_AGENT};
 use url::Url;
@@ -90,24 +92,15 @@ pub fn validate_overpass_url(url: &str) -> Result<()> {
 ///
 /// Priority: `OVERPASS_URL` env var → hardcoded [`DEFAULT_OVERPASS_URL`].
 ///
-/// # Why `Box::leak`
-///
-/// The return type is `&'static str` for API compatibility with
-/// [`fetch_osm_xml`] and with callers that unify this function's result
-/// against `&str` in match arms. When the env var is set, the owned `String`
-/// is leaked via `Box::leak` to promote it to the `'static` lifetime. This is
-/// acceptable because:
-///   - this function is called at most a handful of times per process (once
-///     per top-level fetch, alongside a network request that dwarfs the
-///     allocation cost), and
-///   - each leak is bounded by the URL length (~50–100 bytes).
-///
-/// When the env var is unset, the `DEFAULT_OVERPASS_URL` static constant is
-/// returned directly with no allocation.
-pub fn default_overpass_url() -> &'static str {
+/// Returns [`Cow<'static, str>`]: a borrow of the [`DEFAULT_OVERPASS_URL`]
+/// static when the env var is unset (no allocation), or an owned `String`
+/// wrapped in the `Cow` when it is set. Callers that need a `&str` should bind
+/// the result to a local and borrow it (see `sources::merge_source_data`),
+/// rather than relying on a `'static` reference.
+pub fn default_overpass_url() -> Cow<'static, str> {
     match std::env::var("OVERPASS_URL") {
-        Ok(url) => &*Box::leak(url.into_boxed_str()),
-        Err(_) => DEFAULT_OVERPASS_URL,
+        Ok(url) => Cow::Owned(url),
+        Err(_) => Cow::Borrowed(DEFAULT_OVERPASS_URL),
     }
 }
 
@@ -337,7 +330,7 @@ mod tests {
     fn overpass_request_includes_user_agent() {
         let client = reqwest::blocking::Client::builder().build().unwrap();
         let request =
-            build_overpass_request(&client, default_overpass_url(), "node(0,0,1,1);").unwrap();
+            build_overpass_request(&client, &default_overpass_url(), "node(0,0,1,1);").unwrap();
 
         let user_agent = request
             .headers()

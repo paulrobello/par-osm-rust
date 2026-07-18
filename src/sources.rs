@@ -431,9 +431,10 @@ where
 
     let mut last_progress = 0.0;
     emit_progress(progress_cb, &mut last_progress, 0.0, "Fetching OSM data…");
+    let default_url = crate::overpass::default_overpass_url();
     let overpass_url = match options.overpass_url.as_deref() {
         Some(url) => url,
-        None => crate::overpass::default_overpass_url(),
+        None => &default_url,
     };
     let osm_data = fetch_osm(
         bbox,
