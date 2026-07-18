@@ -9,21 +9,29 @@
 //! dependency — callers should check [`is_cli_available`] before attempting
 //! any download.  If the CLI is absent, the integration is silently skipped.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 use crate::cache_store::{CacheMeta as CacheMetaTrait, RawCache};
 use crate::osm::{FeatureSource, OsmData, OsmNode, OsmPoiNode, OsmWay};
 use crate::synthetic_ids::OvertureIdAllocator;
 
+#[cfg(feature = "blocking")]
+use anyhow::bail;
+#[cfg(feature = "blocking")]
+use std::io::Read;
+#[cfg(feature = "blocking")]
+use std::sync::OnceLock;
+#[cfg(feature = "blocking")]
+use std::time::Instant;
+
+#[cfg(feature = "blocking")]
 /// Environment override that selects an absolute path to the `overturemaps`
 /// CLI binary, bypassing the default PATH lookup (SEC-010). Must be set to an
 /// absolute path that exists on disk; relative paths or missing files fall
@@ -222,9 +230,12 @@ impl OvertureParams {
 
 // ── CLI availability check ────────────────────────────────────────────────
 
+#[cfg(feature = "blocking")]
 const CLI_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(feature = "blocking")]
 const CLI_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
+#[cfg(feature = "blocking")]
 /// Resolve the `overturemaps` CLI binary path (SEC-010).
 ///
 /// Resolution order:
@@ -250,6 +261,7 @@ fn resolve_overture_cli() -> PathBuf {
     PathBuf::from("overturemaps")
 }
 
+#[cfg(feature = "blocking")]
 /// Check whether the `overturemaps` CLI is available on the system PATH (or
 /// via the `PAR_OSM_OVERTURE_CLI` override — see [`resolve_overture_cli`]).
 ///
@@ -282,6 +294,7 @@ pub fn is_cli_available() -> bool {
     }
 }
 
+#[cfg(feature = "blocking")]
 /// Best-effort probe of the `overturemaps` CLI version string (ARC-001).
 ///
 /// Spawn-and-poll `overturemaps --version`, capturing stdout. Returns the
@@ -334,6 +347,7 @@ fn probe_cli_version_uncached() -> String {
         .to_string()
 }
 
+#[cfg(feature = "blocking")]
 /// Process-wide cached `overturemaps` CLI version. Probed once on first use
 /// (ARC-001); subsequent calls return the cached value without re-shelling
 /// out. Probing failure yields `"unknown"`.
@@ -342,8 +356,10 @@ fn cached_cli_version() -> &'static str {
     CACHED.get_or_init(probe_cli_version_uncached)
 }
 
+#[cfg(feature = "blocking")]
 const STDERR_SNIPPET_LIMIT: usize = 4096;
 
+#[cfg(feature = "blocking")]
 fn stderr_suffix(stderr: &[u8]) -> String {
     let stderr = String::from_utf8_lossy(stderr);
     let stderr = stderr.trim();
@@ -361,6 +377,7 @@ fn stderr_suffix(stderr: &[u8]) -> String {
     }
 }
 
+#[cfg(feature = "blocking")]
 fn str_prefix_at_boundary(s: &str, max_bytes: usize) -> &str {
     let mut end = max_bytes.min(s.len());
     while !s.is_char_boundary(end) {
@@ -369,6 +386,7 @@ fn str_prefix_at_boundary(s: &str, max_bytes: usize) -> &str {
     &s[..end]
 }
 
+#[cfg(feature = "blocking")]
 fn str_suffix_at_boundary(s: &str, max_bytes: usize) -> &str {
     let mut start = s.len().saturating_sub(max_bytes);
     while !s.is_char_boundary(start) {
@@ -377,11 +395,13 @@ fn str_suffix_at_boundary(s: &str, max_bytes: usize) -> &str {
     &s[start..]
 }
 
+#[cfg(feature = "blocking")]
 fn read_stderr_file(stderr_path: &Path, cli_type: &str) -> Result<Vec<u8>> {
     std::fs::read(stderr_path)
         .with_context(|| format!("reading overturemaps stderr for type '{cli_type}'"))
 }
 
+#[cfg(feature = "blocking")]
 fn wait_with_stderr_file_timeout(
     mut child: std::process::Child,
     stderr_path: &Path,
@@ -416,6 +436,7 @@ fn wait_with_stderr_file_timeout(
 
 // ── GeoJSON download via CLI ──────────────────────────────────────────────
 
+#[cfg(feature = "blocking")]
 /// Validate a `cli_type` string before passing it to the `overturemaps` CLI
 /// (SEC-012).
 ///
@@ -439,6 +460,7 @@ fn validate_cli_type(cli_type: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "blocking")]
 /// Download Overture GeoJSON for a single CLI type and bounding box.
 ///
 /// Honors the `PAR_OSM_OVERTURE_CLI` environment override for the binary
@@ -1192,6 +1214,7 @@ fn clear_overture_cache_dir(dir: &Path, min_age: Option<chrono::Duration>) -> Re
 
 // ── High-level fetch API ──────────────────────────────────────────────────
 
+#[cfg(feature = "blocking")]
 /// Create an empty [`OsmData`] to accumulate merged results into.
 fn empty_osm_data() -> OsmData {
     OsmData::new(
@@ -1205,6 +1228,7 @@ fn empty_osm_data() -> OsmData {
     )
 }
 
+#[cfg(feature = "blocking")]
 /// Fetch + cache + parse a single Overture theme/CLI-type pair (QA-007).
 ///
 /// Shared by [`fetch_overture_data`] (which propagates the error) and
@@ -1242,6 +1266,7 @@ fn fetch_one_theme(
         .with_context(|| format!("parsing Overture GeoJSON for type '{cli_type}'"))
 }
 
+#[cfg(feature = "blocking")]
 /// Fetch Overture Maps data for the enabled themes in `params` and normalize
 /// it into a single [`OsmData`] (DOC-011: removed the duplicated summary that
 /// previously appeared around the `# Errors` section).
@@ -1265,9 +1290,9 @@ fn fetch_one_theme(
 /// # Examples
 ///
 /// ```no_run
+/// # #[cfg(feature = "blocking")] fn main() -> anyhow::Result<()> {
 /// use par_osm_rust::overture::{fetch_overture_data, OvertureParams, OvertureTheme};
 ///
-/// # fn main() -> anyhow::Result<()> {
 /// let bbox = (38.0, -121.0, 38.01, -120.99); // south, west, north, east
 /// let params = OvertureParams {
 ///     enabled: true,
@@ -1279,6 +1304,7 @@ fn fetch_one_theme(
 /// println!("{} ways", data.iter_ways().count());
 /// # Ok(())
 /// # }
+/// # #[cfg(not(feature = "blocking"))] fn main() {}
 /// ```
 pub fn fetch_overture_data(
     bbox: (f64, f64, f64, f64),
@@ -1339,6 +1365,7 @@ pub fn fetch_overture_data(
     Ok(accumulated)
 }
 
+#[cfg(feature = "blocking")]
 /// Like [`fetch_overture_data`] but never fails.
 ///
 /// - If Overture is disabled, returns empty [`OsmData`].
@@ -1396,15 +1423,20 @@ pub fn fetch_overture_data_best_effort(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "blocking")]
     use std::ffi::OsString;
+    #[cfg(feature = "blocking")]
     use std::sync::Mutex;
 
+    #[cfg(feature = "blocking")]
     static PATH_LOCK: Mutex<()> = Mutex::new(());
 
+    #[cfg(feature = "blocking")]
     struct PathGuard {
         original_path: Option<OsString>,
     }
 
+    #[cfg(feature = "blocking")]
     impl Drop for PathGuard {
         fn drop(&mut self) {
             match &self.original_path {
@@ -1423,6 +1455,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "blocking")]
     fn prepend_to_path(path: &Path) -> PathGuard {
         let original_path = std::env::var_os("PATH");
         let mut paths = vec![path.to_path_buf()];
@@ -1438,7 +1471,7 @@ mod tests {
         PathGuard { original_path }
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "blocking"))]
     fn write_fake_overturemaps(dir: &Path, script: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
 
@@ -1546,7 +1579,7 @@ mod tests {
 
     // ── CLI tests ────────────────────────────────────────────────────────
 
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "blocking"))]
     #[test]
     fn fetch_geojson_drains_large_stderr_without_waiting_for_timeout() {
         let tmp = tempfile::tempdir().expect("tmpdir");
@@ -1911,6 +1944,7 @@ exit 23
 
     // ── SEC-012 argument-injection guard ────────────────────────────────
 
+    #[cfg(feature = "blocking")]
     #[test]
     fn validate_cli_type_rejects_dash_and_whitespace() {
         // Bare theme name accepted.
@@ -1929,6 +1963,7 @@ exit 23
         assert!(validate_cli_type("\nbuilding").is_err());
     }
 
+    #[cfg(feature = "blocking")]
     #[test]
     fn fetch_geojson_for_type_rejects_argument_injection() {
         // SEC-012: a user-controlled cli_type must not reach the CLI as a flag.

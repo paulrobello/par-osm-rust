@@ -8,6 +8,16 @@ authors = ["Paul Robello <probello@gmail.com>"]
 license = "MIT"
 repository = "https://github.com/paulrobello/par-osm-rust"
 
+[features]
+# Default build pulls in the blocking `reqwest`-based network paths so the
+# crate's documented public API (Overpass fetch, SRTM download, Overture CLI
+# orchestration) works out of the box. Disable default features to compile
+# only the pure subset: data model, parsing, writing, cache I/O, filter,
+# synthetic IDs, and elevation. Async-only or no-network consumers can opt
+# out with `default-features = false`. Breaking change in 0.2.0 (ARC-012).
+default = ["blocking"]
+blocking = ["dep:reqwest"]
+
 [dependencies]
 anyhow = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
@@ -16,7 +26,7 @@ log = "0.4"
 memmap2 = "0.9"
 osmpbf = "0.3.8"
 quick-xml = "0.41"
-reqwest = { version = "0.13", features = ["blocking"] }
+reqwest = { version = "0.13", optional = true, features = ["blocking"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.11"

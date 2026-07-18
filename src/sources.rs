@@ -12,6 +12,7 @@
 
 use std::collections::HashMap;
 
+#[cfg(feature = "blocking")]
 use anyhow::Result;
 
 use crate::filter::FeatureFilter;
@@ -396,6 +397,7 @@ pub fn merge_source_data(
     }
 }
 
+#[cfg(feature = "blocking")]
 fn emit_progress(
     progress_cb: &mut dyn FnMut(f32, &str),
     last_progress: &mut f32,
@@ -413,6 +415,7 @@ fn emit_progress(
     }
 }
 
+#[cfg(feature = "blocking")]
 pub(crate) fn fetch_map_data_with_fetchers<FetchOsm, FetchOverture>(
     bbox: (f64, f64, f64, f64),
     options: &SourceOptions,
@@ -504,6 +507,7 @@ where
     Ok(result)
 }
 
+#[cfg(feature = "blocking")]
 /// Fetch OSM/Overpass data, optionally fetch Overture data, and apply source policy.
 ///
 /// `bbox` is `(south, west, north, east)` in decimal degrees. `progress` receives
@@ -518,6 +522,7 @@ where
 /// # Examples
 ///
 /// ```no_run
+/// # #[cfg(feature = "blocking")] fn main() {
 /// use par_osm_rust::sources::{fetch_map_data, SourceOptions};
 ///
 /// let bbox = (38.0, -121.0, 38.01, -120.99); // south, west, north, east
@@ -525,6 +530,8 @@ where
 /// let mut progress = |pct: f32, msg: &str| println!("{pct:.0}% {msg}");
 /// let result = fetch_map_data(bbox, &options, &mut progress).expect("fetch succeeds");
 /// println!("status: {:?}", result.status);
+/// # }
+/// # #[cfg(not(feature = "blocking"))] fn main() {}
 /// ```
 pub fn fetch_map_data(
     bbox: (f64, f64, f64, f64),
@@ -588,10 +595,12 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "blocking")]
     fn test_bbox() -> (f64, f64, f64, f64) {
         (0.0, 0.0, 1.0, 1.0)
     }
 
+    #[cfg(feature = "blocking")]
     #[test]
     fn fetch_map_data_default_options_do_not_invoke_overture_fetcher() {
         let options = SourceOptions::default();
@@ -628,6 +637,7 @@ mod tests {
         assert_eq!(progress.last().map(|(pct, _)| *pct), Some(1.0));
     }
 
+    #[cfg(feature = "blocking")]
     #[test]
     fn fetch_map_data_enabled_overture_invokes_fetcher_and_dedupes_preferred_pois() {
         let mut options = SourceOptions::default();
@@ -676,6 +686,7 @@ mod tests {
         assert_eq!(result.data.poi_nodes[0].source, FeatureSource::Overture);
     }
 
+    #[cfg(feature = "blocking")]
     #[test]
     fn fetch_map_data_fallback_captures_overture_error_warning_and_keeps_osm_result() {
         let mut options = SourceOptions::default();
@@ -714,6 +725,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "blocking")]
     #[test]
     fn fetch_map_data_strict_overture_failure_returns_error() {
         let mut options = SourceOptions::default();
@@ -734,6 +746,7 @@ mod tests {
         assert!(err.to_string().contains("strict overture failure"));
     }
 
+    #[cfg(feature = "blocking")]
     #[test]
     fn fetch_map_data_progress_is_monotonic_and_finishes_at_one() {
         let mut options = SourceOptions::default();

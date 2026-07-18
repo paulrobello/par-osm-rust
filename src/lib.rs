@@ -13,13 +13,13 @@
 //! OSM/Overpass plus optional Overture Maps data:
 //!
 //! ```no_run
+//! # #[cfg(feature = "blocking")] fn main() -> anyhow::Result<()> {
 //! use par_osm_rust::filter::FeatureFilter;
 //! use par_osm_rust::overture::{OvertureParams, OvertureTheme};
 //! use par_osm_rust::sources::{
 //!     fetch_map_data, OvertureFailureMode, PoiSourceMode, SourceOptions,
 //! };
 //!
-//! # fn main() -> anyhow::Result<()> {
 //! let bbox = (38.0, -121.0, 38.01, -120.99); // south, west, north, east
 //! let options = SourceOptions {
 //!     filter: FeatureFilter::default(),
@@ -38,6 +38,7 @@
 //! println!("source status: {:?}", result.status);
 //! # Ok(())
 //! # }
+//! # #[cfg(not(feature = "blocking"))] fn main() {}
 //! ```
 //!
 //! Important: [`sources::PoiSourceMode::OverturePreferred`] is the default POI
@@ -63,9 +64,11 @@ pub mod elevation;
 pub mod filter;
 pub mod osm;
 pub mod osm_cache;
+#[cfg(feature = "blocking")]
 pub mod overpass;
 pub mod overture;
 pub mod source_options;
 pub mod sources;
+#[cfg(feature = "blocking")]
 pub mod srtm;
 pub mod synthetic_ids;
