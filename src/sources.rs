@@ -27,6 +27,15 @@ use crate::overture::OvertureParams;
 #[serde(rename_all = "snake_case")]
 pub enum PoiSourceMode {
     /// Use OSM POIs only.
+    ///
+    /// OSM/Overpass data is always fetched. When Overture is also enabled via
+    /// [`SourceOptions::overture`], non-POI Overture geometry (e.g. building
+    /// footprints) is still merged into the result according to Overture theme
+    /// priority, but the final `poi_nodes` collection is reset to the OSM POIs
+    /// only — any Overture POIs are discarded before the merged result is
+    /// returned. Use this mode when you want Overture's richer geometry but
+    /// explicitly do not want its POI corpus, or when running against an
+    /// Overture release whose POI schema you do not trust.
     OsmOnly,
     /// Use Overture POIs only; OSM POIs are cleared when Overture is unavailable.
     OvertureOnly,
@@ -107,21 +116,48 @@ pub struct SourceFetchResult {
     pub warnings: Vec<String>,
 }
 
-fn normalized_name(tags: &HashMap<String, String>) -> Option<String> {
+/// Borrowed view of a POI's name tag, or `None` when absent or whitespace-only.
+///
+/// Returns the raw (untrimmed) string borrowed from `tags`; callers must compare
+/// via [`trimmed_lower_eq`] to apply the same trim+lowercase normalization the
+/// previous allocating helper produced. A missing or whitespace-only name yields
+/// `None`, matching the original semantics so a POI with `name = "   "` is
+/// treated the same as a POI with no name tag at all.
+fn name_raw(tags: &HashMap<String, String>) -> Option<&str> {
     tags.get("name")
-        .map(|name| name.trim().to_lowercase())
-        .filter(|name| !name.is_empty())
+        .map(String::as_str)
+        .filter(|name| !name.trim().is_empty())
 }
 
-fn poi_category(tags: &HashMap<String, String>) -> String {
+/// Borrowed category key/value pair, or `None` when no POI category tag is present.
+///
+/// Returns the first matching tag among `amenity`, `shop`, `tourism`, `leisure`,
+/// `historic`, `man_made` as `(&'static str, &str)` borrowed from `tags`, so dedupe
+/// comparisons allocate zero strings. Two POIs whose tags both miss every category
+/// key both return `None` and therefore compare equal — matching the original
+/// `"unknown" == "unknown"` behaviour without allocating the sentinel string.
+fn poi_category(tags: &HashMap<String, String>) -> Option<(&'static str, &str)> {
     for key in [
         "amenity", "shop", "tourism", "leisure", "historic", "man_made",
     ] {
         if let Some(value) = tags.get(key) {
-            return format!("{key}:{value}");
+            return Some((key, value.as_str()));
         }
     }
-    "unknown".to_string()
+    None
+}
+
+/// Trim+lowercase equality without allocating a normalized `String`.
+///
+/// Streams each character's `char::to_lowercase` expansion through `flat_map`
+/// so the hot dedupe comparison path allocates zero strings. Equivalent to
+/// `a.trim().to_lowercase() == b.trim().to_lowercase()` for any UTF-8 input,
+/// including ASCII case folding and Unicode expansion (e.g. German `ß`).
+fn trimmed_lower_eq(a: &str, b: &str) -> bool {
+    a.trim()
+        .chars()
+        .flat_map(char::to_lowercase)
+        .eq(b.trim().chars().flat_map(char::to_lowercase))
 }
 
 fn metres_between(a: &OsmPoiNode, b: &OsmPoiNode) -> f64 {
@@ -134,32 +170,84 @@ fn metres_between(a: &OsmPoiNode, b: &OsmPoiNode) -> f64 {
 }
 
 fn poi_duplicates(a: &OsmPoiNode, b: &OsmPoiNode) -> bool {
-    let same_category = poi_category(&a.tags) == poi_category(&b.tags);
-    if !same_category {
+    if poi_category(&a.tags) != poi_category(&b.tags) {
         return false;
     }
-    match (normalized_name(&a.tags), normalized_name(&b.tags)) {
-        (Some(a_name), Some(b_name)) if a_name == b_name => metres_between(a, b) <= 25.0,
+    match (name_raw(&a.tags), name_raw(&b.tags)) {
+        (Some(a_name), Some(b_name)) if trimmed_lower_eq(a_name, b_name) => {
+            metres_between(a, b) <= 25.0
+        }
         (None, None) => metres_between(a, b) <= 10.0,
         _ => false,
     }
 }
 
+/// Cell size (in metres) for the spatial bucket used by POI dedupe.
+///
+/// Set to the duplicate distance threshold so the 3×3 neighbor window of any
+/// cell is guaranteed to contain every kept POI within duplicate range of the
+/// candidate. Each cell axis spans at most this many metres for any latitude.
+const DEDUP_CELL_SIZE_M: f64 = 25.0;
+
+/// Snap a lat/lon to an integer grid key whose cells are approximately
+/// `DEDUP_CELL_SIZE_M` metres on a side.
+///
+/// The longitude cell width uses `cos(lat)` so cells stay approximately square
+/// in metres across latitudes. Because the cell size equals the duplicate
+/// distance threshold (25 m), a 3×3 window around the candidate's cell —
+/// `(clat-1..=clat+1, clon-1..=clon+1)` — is guaranteed to contain every kept
+/// POI within `25 m`, which is the maximum distance at which two POIs can be
+/// considered duplicates (named pairs: 25 m; unnamed pairs: 10 m).
+fn dedup_cell(lat: f64, lon: f64) -> (i64, i64) {
+    const METRES_PER_DEGREE_LAT: f64 = 111_320.0;
+    let metres_per_degree_lon = METRES_PER_DEGREE_LAT * lat.to_radians().cos().abs().max(0.01);
+    let cell_lat = (lat * METRES_PER_DEGREE_LAT / DEDUP_CELL_SIZE_M).floor() as i64;
+    let cell_lon = (lon * metres_per_degree_lon / DEDUP_CELL_SIZE_M).floor() as i64;
+    (cell_lat, cell_lon)
+}
+
 fn dedupe_pois_with_overture_preference(mut pois: Vec<OsmPoiNode>) -> Vec<OsmPoiNode> {
+    // Sort by source priority so Overture POIs are inserted first; `sort_by_key`
+    // is stable, preserving input order within each source group. The first POI
+    // of a duplicate group to be inserted is the one kept, so Overture
+    // representatives win over OSM/Synthetic duplicates — the same observable
+    // preference as the original nested-loop implementation.
     pois.sort_by_key(|poi| match poi.source {
         FeatureSource::Overture => 0,
         FeatureSource::Osm => 1,
         FeatureSource::Synthetic => 2,
     });
 
+    // Spatial bucketing: index each kept POI by its `dedup_cell` key. For each
+    // candidate, compare only against kept POIs whose key lies in the
+    // candidate's own cell or one of the 8 neighboring cells (3×3 window).
+    // Because the cell size equals the duplicate distance threshold, that
+    // window is provably sufficient to find every duplicate pair (see
+    // [`dedup_cell`]). The per-candidate comparison count is bounded by the
+    // cell occupancy, so the algorithm is O(n·k) for uniformly-distributed
+    // data instead of the previous O(n²) nested loop.
+    let mut cells: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
     let mut kept: Vec<OsmPoiNode> = Vec::new();
-    'next_poi: for poi in pois {
-        for existing in &kept {
-            if poi_duplicates(existing, &poi) {
-                continue 'next_poi;
+
+    for poi in pois {
+        let (clat, clon) = dedup_cell(poi.lat, poi.lon);
+        let mut duplicate = false;
+        'neighborhood: for dlat in -1..=1_i64 {
+            for dlon in -1..=1_i64 {
+                if let Some(indices) = cells.get(&(clat + dlat, clon + dlon)) {
+                    for &idx in indices {
+                        if poi_duplicates(&kept[idx], &poi) {
+                            duplicate = true;
+                            break 'neighborhood;
+                        }
+                    }
+                }
             }
         }
-        kept.push(poi);
+        if !duplicate {
+            cells.entry((clat, clon)).or_default().push(kept.len());
+            kept.push(poi);
+        }
     }
     kept
 }
@@ -169,6 +257,45 @@ fn dedupe_pois_with_overture_preference(mut pois: Vec<OsmPoiNode>) -> Vec<OsmPoi
 /// Duplicate POIs are detected by category, normalized name, and distance. When
 /// both sources describe the same POI, the Overture representative is retained.
 /// This function performs no network or cache I/O.
+///
+/// # Examples
+///
+/// With no Overture data supplied, [`PoiSourceMode::OverturePreferred`] falls
+/// back to OSM POIs and reports the fallback status:
+///
+/// ```
+/// use std::collections::HashMap;
+///
+/// use par_osm_rust::osm::{FeatureSource, OsmData, OsmPoiNode};
+/// use par_osm_rust::sources::{merge_source_data, PoiSourceMode, SourceStatus};
+///
+/// fn empty_osm_data() -> OsmData {
+///     OsmData::new(
+///         HashMap::new(),
+///         Vec::new(),
+///         Vec::new(),
+///         None,
+///         Vec::new(),
+///         Vec::new(),
+///         Vec::new(),
+///     )
+/// }
+///
+/// let mut osm = empty_osm_data();
+/// osm.poi_nodes.push(OsmPoiNode {
+///     lat: 51.5,
+///     lon: -0.1,
+///     tags: HashMap::from([
+///         ("amenity".to_string(), "restaurant".to_string()),
+///         ("name".to_string(), "Diner".to_string()),
+///     ]),
+///     source: FeatureSource::Osm,
+/// });
+///
+/// let result = merge_source_data(osm, None, PoiSourceMode::OverturePreferred);
+/// assert_eq!(result.status, SourceStatus::OvertureFallbackToOsm);
+/// assert_eq!(result.data.poi_nodes.len(), 1);
+/// ```
 pub fn merge_source_data(
     mut osm_data: OsmData,
     overture_data: Option<OsmData>,
@@ -386,6 +513,18 @@ where
 /// Overture fetches are gated by `options.overture.enabled`. If Overture is
 /// disabled, no Overture CLI check, cache read, or network request is performed
 /// even when `options.poi_source_mode` is [`PoiSourceMode::OverturePreferred`].
+///
+/// # Examples
+///
+/// ```no_run
+/// use par_osm_rust::sources::{fetch_map_data, SourceOptions};
+///
+/// let bbox = (38.0, -121.0, 38.01, -120.99); // south, west, north, east
+/// let options = SourceOptions::default();
+/// let mut progress = |pct: f32, msg: &str| println!("{pct:.0}% {msg}");
+/// let result = fetch_map_data(bbox, &options, &mut progress).expect("fetch succeeds");
+/// println!("status: {:?}", result.status);
+/// ```
 pub fn fetch_map_data(
     bbox: (f64, f64, f64, f64),
     options: &SourceOptions,
@@ -875,5 +1014,230 @@ mod tests {
         assert_eq!(merged.data.tree_nodes.len(), 1);
         assert_eq!(merged.data.tree_nodes[0].lat, 51.5);
         assert_eq!(merged.data.tree_nodes[0].lon, -0.1);
+    }
+
+    // --- Spatial-grid dedupe tests (ARC-002 / QA-002) -----------------------
+    //
+    // These tests exercise the O(n·k) spatial-grid path specifically. They
+    // place duplicates in cells that a naive single-cell dedupe would miss
+    // (adjacent cells, diagonal neighbors, boundary-straddling pairs) and
+    // confirm the 3×3 neighbor window catches every duplicate pair while
+    // still rejecting pairs beyond the distance threshold.
+
+    /// One degree of latitude ≈ this many metres; matches `metres_between`.
+    const METRES_PER_DEGREE_LAT: f64 = 111_320.0;
+
+    #[test]
+    fn spatial_grid_dedupes_duplicates_straddling_a_lat_cell_boundary() {
+        // Two POIs whose lat positions fall on opposite sides of a cell
+        // boundary (one in cell 0, the other in cell 1) but are within the
+        // duplicate distance threshold. A naive single-cell dedupe would miss
+        // this; the 3×3 neighbor window must catch it.
+        let boundary_lat = 25.0 / METRES_PER_DEGREE_LAT; // one cell north of equator
+        let epsilon = 1.0e-7;
+        let pois = vec![
+            poi(
+                boundary_lat - epsilon,
+                0.0,
+                "amenity",
+                "restaurant",
+                "Border Bistro",
+                FeatureSource::Osm,
+            ),
+            poi(
+                boundary_lat + epsilon,
+                0.0,
+                "amenity",
+                "restaurant",
+                "Border Bistro",
+                FeatureSource::Osm,
+            ),
+        ];
+        let kept = dedupe_pois_with_overture_preference(pois);
+        assert_eq!(kept.len(), 1, "boundary-straddling lat pair must dedupe");
+    }
+
+    #[test]
+    fn spatial_grid_dedupes_duplicates_straddling_a_lon_cell_boundary() {
+        // Same boundary-straddling test, but on the longitude axis at the
+        // equator. The 3×3 window must look across the lon-cell boundary.
+        let boundary_lon = 25.0 / METRES_PER_DEGREE_LAT; // 25 m east at the equator
+        let epsilon = 1.0e-7;
+        let pois = vec![
+            poi(
+                0.0,
+                boundary_lon - epsilon,
+                "amenity",
+                "restaurant",
+                "Border Bistro",
+                FeatureSource::Osm,
+            ),
+            poi(
+                0.0,
+                boundary_lon + epsilon,
+                "amenity",
+                "restaurant",
+                "Border Bistro",
+                FeatureSource::Osm,
+            ),
+        ];
+        let kept = dedupe_pois_with_overture_preference(pois);
+        assert_eq!(kept.len(), 1, "boundary-straddling lon pair must dedupe");
+    }
+
+    #[test]
+    fn spatial_grid_dedupes_duplicates_in_diagonally_adjacent_cells() {
+        // Two POIs near the shared corner of four cells (delta = +1 cell lat,
+        // +1 cell lon). The 3×3 window must catch the diagonal neighbor; a
+        // rook-neighbourhood (only N/S/E/W) would miss it.
+        let boundary = 25.0 / METRES_PER_DEGREE_LAT;
+        let epsilon = 1.0e-7;
+        let pois = vec![
+            poi(
+                boundary - epsilon,
+                boundary - epsilon,
+                "amenity",
+                "restaurant",
+                "Corner Cafe",
+                FeatureSource::Osm,
+            ),
+            poi(
+                boundary + epsilon,
+                boundary + epsilon,
+                "amenity",
+                "restaurant",
+                "Corner Cafe",
+                FeatureSource::Osm,
+            ),
+        ];
+        let kept = dedupe_pois_with_overture_preference(pois);
+        assert_eq!(kept.len(), 1, "diagonal-adjacent pair must dedupe");
+    }
+
+    #[test]
+    fn spatial_grid_keeps_non_duplicates_in_adjacent_cells() {
+        // Two POIs in adjacent cells but > 25 m apart — the 3×3 window visits
+        // them, but `poi_duplicates` must reject on the distance threshold.
+        // Guards against the spatial grid being over-eager.
+        let pois = vec![
+            poi(
+                0.0,
+                0.0,
+                "amenity",
+                "restaurant",
+                "Origin Cafe",
+                FeatureSource::Osm,
+            ),
+            poi(
+                0.0,
+                30.0 / METRES_PER_DEGREE_LAT, // 30 m east, beyond 25 m threshold
+                "amenity",
+                "restaurant",
+                "Origin Cafe",
+                FeatureSource::Osm,
+            ),
+        ];
+        let kept = dedupe_pois_with_overture_preference(pois);
+        assert_eq!(
+            kept.len(),
+            2,
+            "near-but-beyond-threshold pair must both keep"
+        );
+    }
+
+    #[test]
+    fn spatial_grid_dedupes_unnamed_pois_within_ten_metres() {
+        // POIs with no name tag dedupe within 10 m (not 25 m) per the original
+        // `poi_duplicates` semantics. The spatial grid must preserve this.
+        let pois = vec![
+            poi(0.0, 0.0, "amenity", "restaurant", "", FeatureSource::Osm),
+            poi(
+                0.0,
+                5.0 / METRES_PER_DEGREE_LAT,
+                "amenity",
+                "restaurant",
+                "",
+                FeatureSource::Osm,
+            ),
+        ];
+        let kept = dedupe_pois_with_overture_preference(pois);
+        assert_eq!(kept.len(), 1, "unnamed pair within 10 m must dedupe");
+    }
+
+    #[test]
+    fn spatial_grid_preserves_overture_preference_across_cell_boundary() {
+        // An OSM POI and an Overture POI straddling a cell boundary with
+        // matching category+name. The Overture representative must win,
+        // regardless of input order — confirms the spatial grid preserves
+        // the Overture-preference semantics exactly.
+        let boundary_lat = 25.0 / METRES_PER_DEGREE_LAT;
+        let epsilon = 1.0e-7;
+        let overture = poi(
+            boundary_lat + epsilon,
+            0.0,
+            "amenity",
+            "restaurant",
+            "Border Bistro",
+            FeatureSource::Overture,
+        );
+        let osm = poi(
+            boundary_lat - epsilon,
+            0.0,
+            "amenity",
+            "restaurant",
+            "Border Bistro",
+            FeatureSource::Osm,
+        );
+
+        // OSM first in input order — sort must still promote Overture.
+        let kept = dedupe_pois_with_overture_preference(vec![osm.clone(), overture.clone()]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].source, FeatureSource::Overture);
+
+        // Overture first in input order — must remain Overture.
+        let kept = dedupe_pois_with_overture_preference(vec![overture, osm]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].source, FeatureSource::Overture);
+    }
+
+    #[test]
+    fn spatial_grid_handles_large_synthetic_poi_set() {
+        // Synthetic stress test: 1000 distinct POIs at ~100 m spacing (4 cells
+        // apart, so no two are within duplicate range), plus 500 near-
+        // duplicates displaced by ~7 m. Confirms the O(n·k) spatial-grid path
+        // produces the same dedupe result a naive O(n²) algorithm would:
+        // 1000 survivors out of 1500 inputs. Correctness check, not a bench.
+        let mut pois = Vec::with_capacity(1500);
+        for i in 0..1000_i64 {
+            let lat = (i as f64) * 100.0 / METRES_PER_DEGREE_LAT;
+            let lon = (i as f64) * 100.0 / METRES_PER_DEGREE_LAT;
+            pois.push(poi(
+                lat,
+                lon,
+                "amenity",
+                "restaurant",
+                &format!("Place {i}"),
+                FeatureSource::Osm,
+            ));
+        }
+        for i in 0..500_i64 {
+            // ~7 m north-east of `Place i` — within the 25 m threshold.
+            let lat = (i as f64) * 100.0 / METRES_PER_DEGREE_LAT + 5.0 / METRES_PER_DEGREE_LAT;
+            let lon = (i as f64) * 100.0 / METRES_PER_DEGREE_LAT + 5.0 / METRES_PER_DEGREE_LAT;
+            pois.push(poi(
+                lat,
+                lon,
+                "amenity",
+                "restaurant",
+                &format!("Place {i}"),
+                FeatureSource::Osm,
+            ));
+        }
+        let kept = dedupe_pois_with_overture_preference(pois);
+        assert_eq!(
+            kept.len(),
+            1000,
+            "each of 500 dups collapses onto its source"
+        );
     }
 }
