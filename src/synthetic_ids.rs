@@ -34,7 +34,7 @@
 //!
 //! # Determinism
 //!
-//! The Overture allocator ([`OvertureIdAllocator`]) is instantiated fresh
+//! The Overture allocator (`OvertureIdAllocator`) is instantiated fresh
 //! on every call to `parse_overture_geojson` and dropped when the parse
 //! returns, so two parses of identical GeoJSON produce identical ID
 //! sequences (ARC-009 / QA-010). The previous design used a process-global

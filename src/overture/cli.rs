@@ -59,7 +59,7 @@ fn resolve_overture_cli() -> PathBuf {
 }
 
 /// Check whether the `overturemaps` CLI is available on the system PATH (or
-/// via the `PAR_OSM_OVERTURE_CLI` override — see [`resolve_overture_cli`]).
+/// via the `PAR_OSM_OVERTURE_CLI` override — see `resolve_overture_cli`).
 ///
 /// Runs `overturemaps --version` with a short timeout.  Returns `true` if
 /// the command succeeds (exit code 0), `false` otherwise.
@@ -251,9 +251,9 @@ pub(super) fn validate_cli_type(cli_type: &str) -> Result<()> {
 /// Download Overture GeoJSON for a single CLI type and bounding box.
 ///
 /// Honors the `PAR_OSM_OVERTURE_CLI` environment override for the binary
-/// path (see [`resolve_overture_cli`], SEC-010). The shell-out is
+/// path (see `resolve_overture_cli`, SEC-010). The shell-out is
 /// arg-vector based (no shell); `cli_type` is validated by
-/// [`validate_cli_type`] to reject argument-injection attempts (SEC-012).
+/// `validate_cli_type` to reject argument-injection attempts (SEC-012).
 ///
 /// Invokes:
 /// ```text

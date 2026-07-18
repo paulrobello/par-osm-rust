@@ -58,6 +58,12 @@
 //! - [`cache`] resolves shared cache directories and migrates legacy caches.
 //! - [`cache_store`] provides the generic raw-payload disk cache ([`cache_store::RawCache`]) shared by [`osm_cache`] and [`overture`].
 
+#![doc(html_root_url = "https://docs.rs/par-osm-rust/0.2.0")]
+// DOC-007: every public item in the crate carries a doc comment. Adding
+// `missing_docs` turns silent drift into a clippy error under
+// `cargo clippy -- -D warnings`, so the gate stays green by construction.
+#![warn(missing_docs)]
+
 pub mod cache;
 pub mod cache_store;
 pub mod elevation;

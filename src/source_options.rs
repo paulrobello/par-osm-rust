@@ -90,6 +90,9 @@ pub fn parse_overture_theme_list(themes: &[String]) -> Result<Vec<OvertureTheme>
         .collect()
 }
 
+/// Parse a [`PoiSourceMode`] from a string (`"osm-only"`, `"overture-only"`,
+/// `"both"`, or `"overture-preferred"` / `"preferred"`). Underscores are
+/// normalized to hyphens so `"osm_only"` is accepted as well.
 pub fn parse_poi_source_mode(s: &str) -> Result<PoiSourceMode> {
     match s.to_lowercase().replace('_', "-").as_str() {
         "osm" | "osm-only" => Ok(PoiSourceMode::OsmOnly),
@@ -102,6 +105,9 @@ pub fn parse_poi_source_mode(s: &str) -> Result<PoiSourceMode> {
     }
 }
 
+/// Parse an [`OvertureFailureMode`] from a string (`"fallback"` /
+/// `"fallback-to-osm"`, or `"fail"` / `"strict`). Underscores are normalized
+/// to hyphens so `"fallback_to_osm"` is accepted as well.
 pub fn parse_overture_failure_mode(s: &str) -> Result<OvertureFailureMode> {
     match s.to_lowercase().replace('_', "-").as_str() {
         "fallback" | "fallback-to-osm" => Ok(OvertureFailureMode::FallbackToOsm),

@@ -14,7 +14,9 @@ use std::collections::{HashMap, HashSet};
 /// A geographic point from the OSM dataset.
 #[derive(Debug, Clone, Copy)]
 pub struct OsmNode {
+    /// Latitude in decimal degrees (WGS-84).
     pub lat: f64,
+    /// Longitude in decimal degrees (WGS-84).
     pub lon: f64,
 }
 
@@ -22,9 +24,15 @@ pub struct OsmNode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FeatureSource {
+    /// Feature originated from OpenStreetMap (parsed XML/PBF or an
+    /// OSM-conformant mirror like Overpass).
     #[default]
     Osm,
+    /// Feature originated from Overture Maps (normalized GeoJSON).
     Overture,
+    /// Feature was synthesized by the crate itself (no real-world
+    /// counterpart) — e.g. allocator-issued synthetic IDs from
+    /// [`crate::synthetic_ids`].
     Synthetic,
 }
 
@@ -32,9 +40,13 @@ pub enum FeatureSource {
 /// Used for POI marker placement.
 #[derive(Debug, Clone)]
 pub struct OsmPoiNode {
+    /// Latitude in decimal degrees (WGS-84).
     pub lat: f64,
+    /// Longitude in decimal degrees (WGS-84).
     pub lon: f64,
+    /// Free-form OSM tags on the node (`amenity`, `shop`, `name`, …).
     pub tags: HashMap<String, String>,
+    /// Provenance of this POI — OSM, Overture, or synthetic.
     pub source: FeatureSource,
 }
 
@@ -46,8 +58,13 @@ pub struct OsmPoiNode {
 /// plumbing and the writer's reverse way-id lookup (ARC-003 / QA-001).
 #[derive(Debug, Clone)]
 pub struct OsmWay {
+    /// The way's own OSM identifier (the single source of truth; QA-021).
     pub id: i64,
+    /// Free-form OSM tags on the way (`highway`, `building`, `name`, …).
     pub tags: HashMap<String, String>,
+    /// Ordered list of OSM node IDs referenced by the way. Positions are
+    /// resolved against the parent [`OsmData`] node map by consumers
+    /// (parser, writer, clip), not at parse time.
     pub node_refs: Vec<i64>,
 }
 
@@ -63,7 +80,10 @@ pub struct RelationMember {
 /// An OSM relation: a collection of ways with roles and tags.
 #[derive(Debug, Clone)]
 pub struct OsmRelation {
+    /// Free-form OSM tags on the relation (must include `type=multipolygon`
+    /// for the parser to retain it).
     pub tags: HashMap<String, String>,
+    /// Ways belonging to the relation, each with its role.
     pub members: Vec<RelationMember>,
 }
 

@@ -140,7 +140,7 @@ fn parse_member_attrs(e: &BytesStart<'_>) -> (String, i64, String) {
 /// node-position map to emit ways or relations. Position resolution (e.g.
 /// for clipping or rendering) is deferred to consumers.
 ///
-/// Element nesting depth is capped at [`MAX_XML_DEPTH`] (SEC-004).
+/// Element nesting depth is capped at `MAX_XML_DEPTH` (SEC-004).
 ///
 /// # Examples
 ///
@@ -380,7 +380,7 @@ pub fn parse_osm_xml_str(xml: &str) -> Result<OsmData> {
 /// element ordering (Overpass does not guarantee node-before-way); the
 /// same attribute helpers (`parse_bounds_attrs`, `parse_node_attrs`,
 /// `parse_tag_attrs`, `parse_nd_ref`, `parse_member_attrs`) decode each
-/// element; the [`MAX_XML_DEPTH`] cap (SEC-004) bounds element nesting;
+/// element; the `MAX_XML_DEPTH` cap (SEC-004) bounds element nesting;
 /// and the resulting [`OsmWay`]s carry their OSM id (QA-021), fed into
 /// [`OsmData::new`]. For any valid file the output equals
 /// `parse_osm_xml_str(&std::fs::read_to_string(path)?)`.
@@ -400,7 +400,7 @@ pub fn parse_osm_xml_str(xml: &str) -> Result<OsmData> {
 /// # Errors
 ///
 /// Returns an error if the file cannot be opened or read, or if the XML
-/// is malformed (including the [`MAX_XML_DEPTH`] violation, SEC-004).
+/// is malformed (including the `MAX_XML_DEPTH` violation, SEC-004).
 ///
 /// # Examples
 ///

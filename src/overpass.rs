@@ -90,9 +90,9 @@ pub fn validate_overpass_url(url: &str) -> Result<()> {
 /// immediately — there is no process-wide freeze (the previous `OnceLock`
 /// cache surprised callers who set the env var between fetches).
 ///
-/// Priority: `OVERPASS_URL` env var → hardcoded [`DEFAULT_OVERPASS_URL`].
+/// Priority: `OVERPASS_URL` env var → hardcoded `DEFAULT_OVERPASS_URL`.
 ///
-/// Returns [`Cow<'static, str>`]: a borrow of the [`DEFAULT_OVERPASS_URL`]
+/// Returns [`Cow<'static, str>`]: a borrow of the `DEFAULT_OVERPASS_URL`
 /// static when the env var is unset (no allocation), or an owned `String`
 /// wrapped in the `Cow` when it is set. Callers that need a `&str` should bind
 /// the result to a local and borrow it (see `sources::merge_source_data`),
@@ -243,7 +243,7 @@ fn shared_client() -> Result<&'static reqwest::blocking::Client> {
 /// - Validates `bbox` before making any network request.
 /// - Returns a user-readable error for HTTP 429 (server busy).
 /// - Uses the pooled blocking `reqwest` client (call from `spawn_blocking`);
-///   see [`shared_client`] for why the client is reused across calls.
+///   see `shared_client` for why the client is reused across calls.
 /// - Follows no redirects: any 3xx is treated as an error so a compromised
 ///   allowlisted mirror cannot redirect the POST to an internal host (the
 ///   allowlist is only enforced against the initial URL).

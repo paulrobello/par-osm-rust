@@ -86,7 +86,7 @@ impl<Meta: CacheMeta> RawCache<Meta> {
     /// orphan shape) is naturally a miss here: the data file does not exist,
     /// so this returns `None`. Callers that also need a meta-sidecar check
     /// (e.g. URL or TTL matching) should pair this with [`read_meta`](Self::read_meta)
-    /// or use [`read_data_if`](Self::read_data_if).
+    /// and apply the check themselves before consuming the payload.
     pub fn read_data(&self, key: &str) -> Option<String> {
         let path = self.data_path(key);
         match std::fs::read_to_string(&path) {

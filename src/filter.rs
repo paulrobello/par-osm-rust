@@ -10,14 +10,20 @@ fn default_true() -> bool {
 /// rendered during world generation. All fields default to `true`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FeatureFilter {
+    /// Include highways and other routable ways (`highway=*`).
     #[serde(default = "default_true")]
     pub roads: bool,
+    /// Include building footprints and entrance/address nodes (`building=*`,
+    /// `addr:housenumber=*`).
     #[serde(default = "default_true")]
     pub buildings: bool,
+    /// Include waterways and water bodies (`waterway=*`, `natural=water`).
     #[serde(default = "default_true")]
     pub water: bool,
+    /// Include landuse polygons and natural areas (`landuse=*`, `natural=*`).
     #[serde(default = "default_true")]
     pub landuse: bool,
+    /// Include rail lines (`railway=rail`).
     #[serde(default = "default_true")]
     pub railways: bool,
 }
