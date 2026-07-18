@@ -20,8 +20,8 @@ data-source crate used by `osm-to-bedrock` and `osm-world`.
 
 ## Setup
 
-`par-osm-rust` targets **Rust edition 2024** with an **MSRV of 1.87**
-(declared in `Cargo.toml`). Any stable toolchain at or above 1.87 builds the
+`par-osm-rust` targets **Rust edition 2024** with an **MSRV of 1.88**
+(declared in `Cargo.toml`). Any stable toolchain at or above 1.88 builds the
 crate; CI runs on `dtolnay/rust-toolchain@stable`.
 
 ```bash

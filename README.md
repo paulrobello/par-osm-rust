@@ -4,7 +4,7 @@
 [![Crates.io](https://img.shields.io/crates/v/par-osm-rust.svg)](https://crates.io/crates/par-osm-rust)
 [![Docs.rs](https://docs.rs/par-osm-rust/badge.svg)](https://docs.rs/par-osm-rust)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Rust MSRV](https://img.shields.io/badge/rust-1.87%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust MSRV](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org)
 
 Shared Rust utilities for fetching, caching, parsing, and normalizing OpenStreetMap-compatible map data.
 
@@ -358,7 +358,7 @@ The individual targets (`make test`, `make lint`, `make fmt-check`, `make typech
 
 CI (`.github/workflows/ci.yml`) runs the `checkall` equivalents across an ubuntu/macos/windows matrix and adds jobs that are impractical to run locally on every save:
 
-- **MSRV check** — `cargo check --all-targets` on toolchain `1.87.0` (the declared MSRV in `Cargo.toml`).
+- **MSRV check** — `cargo check --all-targets` on toolchain `1.88.0` (the declared MSRV in `Cargo.toml`).
 - **Docs** — `cargo doc --no-deps --all-features` with `RUSTDOCFLAGS=-D warnings`.
 - **Security audit** — `cargo audit` against a regenerated `Cargo.lock`.
 - **Docs lint** — markdownlint-cli2 over `README.md` and `docs/`, plus lychee link-checking the same paths.

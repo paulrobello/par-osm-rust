@@ -58,13 +58,13 @@ pub fn validate_overpass_url(url: &str) -> Result<()> {
     // rejected. This tightens the SSRF allowlist so a compromised allowlisted
     // mirror cannot redirect traffic to an unrelated service bound to a
     // non-443 port on the same host.
-    if let Some(port) = parsed.port() {
-        if port != 443 {
-            bail!(
-                "Overpass URL must use port 443 (or omit the port) on an approved host; \
-                 got port {port}"
-            );
-        }
+    if let Some(port) = parsed.port()
+        && port != 443
+    {
+        bail!(
+            "Overpass URL must use port 443 (or omit the port) on an approved host; \
+             got port {port}"
+        );
     }
 
     let host = parsed

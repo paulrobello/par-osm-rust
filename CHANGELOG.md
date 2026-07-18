@@ -56,7 +56,7 @@ changes are tagged **Breaking —** inline and require downstream `osm-to-bedroc
   `cache_store::RawCache`, used by both `osm_cache` and the Overture cache so
   the fix lives in one place.
 - **CI hardening (ARC-014 / ARC-021 / DOC-016).** CI now runs an MSRV-check job
-  (pinned to the declared `1.87`), a `cargo doc --no-deps -D warnings` job, a
+  (pinned to the declared `1.88`), a `cargo doc --no-deps -D warnings` job, a
   `cargo audit` job, a docs-lint job (markdownlint-cli2 + lychee), and an
   ubuntu/macos/windows matrix for the lint and test jobs.
 - **CHANGELOG.md and CONTRIBUTING.md (DOC-002 / DOC-003).**
