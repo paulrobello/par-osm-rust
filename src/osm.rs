@@ -1,6 +1,21 @@
-//! OSM PBF file parser.
+//! OpenStreetMap data model, parsers, and serializer.
 //!
-//! Reads nodes, ways, and their tags from a `.osm.pbf` file.
+//! This module owns the [`OsmData`] model shared across the crate (nodes,
+//! ways, multipolygon relations, POI / address / tree node collections, and
+//! the dataset bounding box) plus the functions that produce and consume it:
+//!
+//! * [`parse_pbf`] reads a `.osm.pbf` file via `osmpbf`'s memory-mapped
+//!   `ElementReader`.
+//! * [`parse_osm_xml_str`] / [`parse_osm_xml`] / [`parse_osm_file`] parse
+//!   OSM XML in a single `read_event` pass that handles nodes, ways, and
+//!   relations in whatever order they appear (Overpass does not guarantee
+//!   node-before-way ordering).
+//! * [`write_osm_xml_string`] serializes an [`OsmData`] back into the simple
+//!   OSM XML dialect this crate and `osm-world` can re-parse.
+//!
+//! [`OsmData`] also exposes [`OsmData::merge`] (combine two datasets) and
+//! [`OsmData::clip_to_bbox`] (intersect with a bounding box), used by the
+//! upstream fetch orchestration in [`crate::sources`].
 
 use anyhow::{Context, Result};
 use osmpbf::{Element, ElementReader};
@@ -107,6 +122,24 @@ impl OsmData {
     /// `ways_with_ids` is a `Vec<(id, way)>`; this constructor seeds
     /// `ways_by_id` from those pairs, which is the single place the
     /// `ways`/`ways_by_id` invariant is established.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use par_osm_rust::osm::{OsmData, OsmNode};
+    /// use std::collections::HashMap;
+    ///
+    /// let data = OsmData::new(
+    ///     HashMap::from([(1, OsmNode { lat: 51.5, lon: -0.12 })]),
+    ///     Vec::new(),
+    ///     Vec::new(),
+    ///     None,
+    ///     Vec::new(),
+    ///     Vec::new(),
+    ///     Vec::new(),
+    /// );
+    /// assert_eq!(data.iter_ways().count(), 0);
+    /// ```
     pub fn new(
         nodes: HashMap<i64, OsmNode>,
         ways_with_ids: Vec<(i64, OsmWay)>,
@@ -198,7 +231,27 @@ impl OsmData {
         Ok(())
     }
 
-    /// Merge another `OsmData` into this one, combining nodes, ways, and bounds.
+    /// Merge `other` into `self`, combining every collection [`OsmData`] holds.
+    ///
+    /// This is the central mutation on the central data type, so the contract
+    /// is enumerated in full:
+    ///
+    /// * `nodes` — extended from `other` via `HashMap::extend`. **Collision
+    ///   semantics: last-write-wins** — a node ID present in both `self` and
+    ///   `other` keeps `other`'s value. (Safe by construction today because
+    ///   distinct fetches mint disjoint IDs, but the documented contract is
+    ///   last-write-wins should a future caller allow collisions; see QA-015.)
+    /// * `ways` — `other`'s ways are appended in order; their indices in
+    ///   `ways_by_id` are shifted by `self.ways.len()` so each `(id → index)`
+    ///   entry still points at the right slot. Same last-write-wins collision
+    ///   rule applies to `ways_by_id` if a way ID appears on both sides.
+    /// * `relations` — `other`'s relations are appended; no de-duplication.
+    /// * `poi_nodes`, `addr_nodes`, `tree_nodes` — `other`'s entries are
+    ///   appended in order; no de-duplication.
+    /// * `bounds` — when both sides have a bbox, the per-axis union is stored
+    ///   `(min(min_lat), min(min_lon), max(max_lat), max(max_lon))`. When only
+    ///   one side has a bbox, that bbox is kept. When neither side has one,
+    ///   `bounds` remain `None`.
     pub fn merge(&mut self, other: OsmData) {
         self.nodes.extend(other.nodes);
         let offset = self.ways.len();
@@ -302,7 +355,99 @@ fn xml_attr_parse<T: std::str::FromStr>(attr: &Attribute<'_>) -> Option<T> {
     xml_attr_value(attr).parse().ok()
 }
 
-/// Parse a `.osm.pbf` file and return all nodes and ways.
+/// Shared body of the `Element::Node` and `Element::DenseNode` branches in
+/// [`parse_pbf`]. The two osmpbf element types expose the same `(id, lat, lon,
+/// tags)` surface but through distinct types with no public shared trait, so
+/// the branches resolve those four values and hand them off here (QA-004).
+///
+/// Updates the running bbox accumulator (`min_lat`/`min_lon`/`max_lat`/
+/// `max_lon`), inserts the node into `nodes`, and classifies the tags to push
+/// the node into the appropriate feature collection(s).
+///
+/// Each parameter maps 1:1 to a local accumulator already in scope at the
+/// call site; the long signature is the cost of extracting the duplication
+/// without restructuring the surrounding `parse_pbf` body.
+#[allow(clippy::too_many_arguments)]
+fn process_pbf_node(
+    id: i64,
+    lat: f64,
+    lon: f64,
+    tags: HashMap<String, String>,
+    nodes: &mut HashMap<i64, OsmNode>,
+    poi_nodes: &mut Vec<OsmPoiNode>,
+    addr_nodes: &mut Vec<OsmPoiNode>,
+    tree_nodes: &mut Vec<OsmNode>,
+    min_lat: &mut f64,
+    min_lon: &mut f64,
+    max_lat: &mut f64,
+    max_lon: &mut f64,
+) {
+    *min_lat = min_lat.min(lat);
+    *min_lon = min_lon.min(lon);
+    *max_lat = max_lat.max(lat);
+    *max_lon = max_lon.max(lon);
+    nodes.insert(id, OsmNode { lat, lon });
+    if tags.keys().any(|k| {
+        matches!(
+            k.as_str(),
+            "amenity" | "shop" | "tourism" | "leisure" | "historic"
+        )
+    }) {
+        poi_nodes.push(OsmPoiNode {
+            lat,
+            lon,
+            tags: tags.clone(),
+            source: FeatureSource::Osm,
+        });
+    }
+    if tags.contains_key("addr:housenumber") {
+        addr_nodes.push(OsmPoiNode {
+            lat,
+            lon,
+            tags: tags.clone(),
+            source: FeatureSource::Osm,
+        });
+    }
+    if tags.get("natural").map(|s| s.as_str()) == Some("tree") {
+        tree_nodes.push(OsmNode { lat, lon });
+    }
+}
+
+/// Parse a `.osm.pbf` file into a full [`OsmData`].
+///
+/// Returns nodes, ways (each paired with its OSM id), multipolygon relations,
+/// POI nodes entries (nodes carrying `amenity`/`shop`/`tourism`/`leisure`/
+/// `historic`), address node entries (nodes carrying `addr:housenumber`),
+/// individual tree positions (nodes carrying `natural=tree`), and the
+/// dataset bounding box computed from the observed node lat/lon extrema.
+///
+/// # File-provenance precondition (SEC-008)
+///
+/// `parse_pbf` memory-maps the file at `path` via `osmpbf`'s
+/// `ElementReader::from_path`. The caller MUST ensure the file is not
+/// truncated, replaced, or concurrently modified for the duration of the
+/// call. A mapping whose backing file shrinks underneath the reader can
+/// raise `SIGBUS` when the OS revokes a page that no longer exists. For
+/// untrusted or concurrently-written inputs, copy the file to a stable path
+/// first and parse the copy.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be opened or read, or if the PBF
+/// blob stream is malformed.
+///
+/// # Examples
+///
+/// ```no_run
+/// use par_osm_rust::osm::parse_pbf;
+/// use std::path::Path;
+///
+/// # fn main() -> anyhow::Result<()> {
+/// let data = parse_pbf(Path::new("/path/to/planet.osm.pbf"))?;
+/// println!("{} ways", data.iter_ways().count());
+/// # Ok(())
+/// # }
+/// ```
 pub fn parse_pbf(path: &Path) -> Result<OsmData> {
     let reader =
         ElementReader::from_path(path).with_context(|| format!("opening {}", path.display()))?;
@@ -321,78 +466,44 @@ pub fn parse_pbf(path: &Path) -> Result<OsmData> {
     reader
         .for_each(|element| match element {
             Element::Node(n) => {
-                let lat = n.lat();
-                let lon = n.lon();
-                min_lat = min_lat.min(lat);
-                min_lon = min_lon.min(lon);
-                max_lat = max_lat.max(lat);
-                max_lon = max_lon.max(lon);
-                nodes.insert(n.id(), OsmNode { lat, lon });
                 let tags: HashMap<String, String> = n
                     .tags()
                     .map(|(k, v)| (k.to_string(), v.to_string()))
                     .collect();
-                if tags.keys().any(|k| {
-                    matches!(
-                        k.as_str(),
-                        "amenity" | "shop" | "tourism" | "leisure" | "historic"
-                    )
-                }) {
-                    poi_nodes.push(OsmPoiNode {
-                        lat,
-                        lon,
-                        tags: tags.clone(),
-                        source: FeatureSource::Osm,
-                    });
-                }
-                if tags.contains_key("addr:housenumber") {
-                    addr_nodes.push(OsmPoiNode {
-                        lat,
-                        lon,
-                        tags: tags.clone(),
-                        source: FeatureSource::Osm,
-                    });
-                }
-                if tags.get("natural").map(|s| s.as_str()) == Some("tree") {
-                    tree_nodes.push(OsmNode { lat, lon });
-                }
+                process_pbf_node(
+                    n.id(),
+                    n.lat(),
+                    n.lon(),
+                    tags,
+                    &mut nodes,
+                    &mut poi_nodes,
+                    &mut addr_nodes,
+                    &mut tree_nodes,
+                    &mut min_lat,
+                    &mut min_lon,
+                    &mut max_lat,
+                    &mut max_lon,
+                );
             }
             Element::DenseNode(n) => {
-                let lat = n.lat();
-                let lon = n.lon();
-                min_lat = min_lat.min(lat);
-                min_lon = min_lon.min(lon);
-                max_lat = max_lat.max(lat);
-                max_lon = max_lon.max(lon);
-                nodes.insert(n.id(), OsmNode { lat, lon });
                 let tags: HashMap<String, String> = n
                     .tags()
                     .map(|(k, v)| (k.to_string(), v.to_string()))
                     .collect();
-                if tags.keys().any(|k| {
-                    matches!(
-                        k.as_str(),
-                        "amenity" | "shop" | "tourism" | "leisure" | "historic"
-                    )
-                }) {
-                    poi_nodes.push(OsmPoiNode {
-                        lat,
-                        lon,
-                        tags: tags.clone(),
-                        source: FeatureSource::Osm,
-                    });
-                }
-                if tags.contains_key("addr:housenumber") {
-                    addr_nodes.push(OsmPoiNode {
-                        lat,
-                        lon,
-                        tags: tags.clone(),
-                        source: FeatureSource::Osm,
-                    });
-                }
-                if tags.get("natural").map(|s| s.as_str()) == Some("tree") {
-                    tree_nodes.push(OsmNode { lat, lon });
-                }
+                process_pbf_node(
+                    n.id(),
+                    n.lat(),
+                    n.lon(),
+                    tags,
+                    &mut nodes,
+                    &mut poi_nodes,
+                    &mut addr_nodes,
+                    &mut tree_nodes,
+                    &mut min_lat,
+                    &mut min_lon,
+                    &mut max_lat,
+                    &mut max_lon,
+                );
             }
             Element::Way(w) => {
                 let tags: HashMap<String, String> = w
@@ -564,6 +675,22 @@ fn parse_member_attrs(e: &BytesStart<'_>) -> (String, i64, String) {
 /// for clipping or rendering) is deferred to consumers.
 ///
 /// Element nesting depth is capped at [`MAX_XML_DEPTH`] (SEC-004).
+///
+/// # Examples
+///
+/// ```
+/// use par_osm_rust::osm::parse_osm_xml_str;
+///
+/// let xml = r#"<?xml version="1.0"?>
+/// <osm version="0.6">
+///   <node id="1" lat="51.5" lon="-0.10"/>
+///   <node id="2" lat="51.5" lon="-0.09"/>
+/// </osm>"#;
+///
+/// let data = parse_osm_xml_str(xml)?;
+/// assert_eq!(data.iter_ways().count(), 0);
+/// # Ok::<(), anyhow::Error>(())
+/// ```
 pub fn parse_osm_xml_str(xml: &str) -> Result<OsmData> {
     let mut nodes: HashMap<i64, OsmNode> = HashMap::new();
     let mut ways_with_ids: Vec<(i64, OsmWay)> = Vec::new();
@@ -818,6 +945,31 @@ fn write_tags(xml: &mut String, tags: &HashMap<String, String>) {
 
 /// Serialize normalized [`OsmData`] into simple OSM XML that this crate and
 /// `osm-world` can parse again.
+///
+/// The output is structurally valid OSM XML even when the source carries
+/// partial data: ways that reference node IDs missing from `data.nodes` have
+/// the dangling `<nd ref>` entries skipped (with a `log::warn!` per skipped
+/// ref) so a downstream parser never receives a way pointing at a node that
+/// does not exist.
+///
+/// # Examples
+///
+/// ```
+/// use par_osm_rust::osm::{write_osm_xml_string, OsmData, OsmNode};
+/// use std::collections::HashMap;
+///
+/// let data = OsmData::new(
+///     HashMap::from([(1, OsmNode { lat: 51.5, lon: -0.10 })]),
+///     Vec::new(),
+///     Vec::new(),
+///     None,
+///     Vec::new(),
+///     Vec::new(),
+///     Vec::new(),
+/// );
+/// let xml = write_osm_xml_string(&data);
+/// assert!(xml.contains("<node id=\"1\""));
+/// ```
 pub fn write_osm_xml_string(data: &OsmData) -> String {
     let mut xml =
         String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<osm version=\"0.6\">\n");
@@ -868,14 +1020,34 @@ pub fn write_osm_xml_string(data: &OsmData) -> String {
         ));
     }
 
+    // Build an inverse map (way index -> way id) ONCE so each way's id is an
+    // O(1) lookup instead of a per-way linear scan of `ways_by_id` (ARC-003).
+    // The invariant guarantees every way index appears here; the
+    // `writer_way_id(idx)` fallback preserves the original safety net for an
+    // externally-constructed `OsmData` that has drifted.
+    let way_id_by_index: HashMap<usize, i64> = data
+        .ways_by_id
+        .iter()
+        .map(|(id, &idx)| (idx, *id))
+        .collect();
+
     for (idx, way) in data.ways.iter().enumerate() {
-        let way_id = data
-            .ways_by_id
-            .iter()
-            .find_map(|(id, way_idx)| (*way_idx == idx).then_some(*id))
+        let way_id = way_id_by_index
+            .get(&idx)
+            .copied()
             .unwrap_or_else(|| writer_way_id(idx));
         xml.push_str(&format!("  <way id=\"{}\">\n", way_id));
         for node_ref in &way.node_refs {
+            // ARC-016: emit `<nd ref>` only for nodes that actually exist in
+            // the dataset so the serialized XML is always structurally valid.
+            // Skipping is logged so the data loss is observable; we never
+            // panic on a partially-populated `OsmData`.
+            if !data.nodes.contains_key(node_ref) {
+                log::warn!(
+                    "write_osm_xml_string: way {way_id} references missing node {node_ref}; skipping dangling <nd ref>"
+                );
+                continue;
+            }
             xml.push_str(&format!("    <nd ref=\"{}\"/>\n", node_ref));
         }
         write_tags(&mut xml, &way.tags);
@@ -1617,5 +1789,97 @@ mod tests {
         assert_eq!(parsed.poi_nodes.len(), original.poi_nodes.len());
         assert_eq!(parsed.poi_nodes[0].tags, original.poi_nodes[0].tags);
         assert_eq!(parsed.bounds, original.bounds);
+    }
+
+    #[test]
+    fn write_osm_xml_string_skips_dangling_nd_refs() {
+        // ARC-016: a way that references a node id not present in `nodes`
+        // must not emit a dangling `<nd ref>` — the serialized XML must be
+        // structurally valid (every <nd ref> resolves to a real <node>).
+        let data = OsmData::new(
+            HashMap::from([
+                (1, OsmNode { lat: 0.0, lon: 0.0 }),
+                (2, OsmNode { lat: 1.0, lon: 1.0 }),
+            ]),
+            vec![(
+                10,
+                OsmWay {
+                    tags: HashMap::new(),
+                    // Node 999 is dangling — not present in `nodes`.
+                    node_refs: vec![1, 2, 999],
+                },
+            )],
+            Vec::new(),
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+
+        let xml = write_osm_xml_string(&data);
+
+        // Present refs are still emitted; the dangling one is skipped.
+        assert!(xml.contains("<nd ref=\"1\"/>"));
+        assert!(xml.contains("<nd ref=\"2\"/>"));
+        assert!(
+            !xml.contains("<nd ref=\"999\"/>"),
+            "dangling <nd ref> must not appear in output: {xml}"
+        );
+
+        // The dangling-ref-free XML must round-trip through the parser
+        // without error, and the surviving way keeps its non-dangling refs.
+        let parsed = parse_osm_xml_str(&xml).expect("dangling-ref-free XML must reparse");
+        parsed.validate_invariants().unwrap();
+        assert_eq!(parsed.way_id_at(0), Some(10));
+        assert_eq!(parsed.ways[0].node_refs, vec![1, 2]);
+    }
+
+    #[test]
+    fn write_osm_xml_string_way_id_lookup_is_o1_correct() {
+        // ARC-003 / QA-001: the writer's inverse-map lookup must produce the
+        // exact same id-per-way-index as the prior linear scan, including
+        // when ways_by_id carries multiple ways (so a per-way O(n) scan
+        // would have been exercised).
+        let data = OsmData::new(
+            HashMap::from([
+                (1, OsmNode { lat: 0.0, lon: 0.0 }),
+                (2, OsmNode { lat: 1.0, lon: 1.0 }),
+                (3, OsmNode { lat: 2.0, lon: 2.0 }),
+                (4, OsmNode { lat: 3.0, lon: 3.0 }),
+            ]),
+            vec![
+                (
+                    100,
+                    OsmWay {
+                        tags: HashMap::new(),
+                        node_refs: vec![1, 2],
+                    },
+                ),
+                (
+                    200,
+                    OsmWay {
+                        tags: HashMap::new(),
+                        node_refs: vec![3, 4],
+                    },
+                ),
+            ],
+            Vec::new(),
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+
+        let xml = write_osm_xml_string(&data);
+
+        // Each way block carries the id corresponding to its index — the
+        // inverse map's correctness contract.
+        let way_lines: Vec<&str> = xml
+            .lines()
+            .filter(|line| line.trim_start().starts_with("<way id=\""))
+            .collect();
+        assert_eq!(way_lines.len(), 2);
+        assert!(way_lines[0].contains("id=\"100\""));
+        assert!(way_lines[1].contains("id=\"200\""));
     }
 }
