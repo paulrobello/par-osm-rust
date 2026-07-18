@@ -15,11 +15,24 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::osm::{FeatureSource, OsmData, OsmNode, OsmPoiNode, OsmWay};
 use crate::synthetic_ids::OvertureIdAllocator;
+
+/// Environment override that selects an absolute path to the `overturemaps`
+/// CLI binary, bypassing the default PATH lookup (SEC-010). Must be set to an
+/// absolute path that exists on disk; relative paths or missing files fall
+/// back to the PATH-based `overturemaps` lookup.
+const OVERTURE_CLI_ENV_OVERRIDE: &str = "PAR_OSM_OVERTURE_CLI";
+
+/// Default cache entry TTL when [`OvertureParams::cache_ttl_secs`] is `None`:
+/// ~30 days. Entries older than this are treated as misses and re-fetched
+/// (ARC-001).
+const OVERTURE_CACHE_DEFAULT_TTL_SECS: u64 = 30 * 24 * 60 * 60;
 
 /// Overture Maps theme selector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -61,6 +74,22 @@ impl OvertureTheme {
     }
 
     /// Parse a user-facing theme string, accepting singular/plural aliases.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use par_osm_rust::overture::OvertureTheme;
+    ///
+    /// assert_eq!(
+    ///     OvertureTheme::from_str_loose("Buildings"),
+    ///     Some(OvertureTheme::Building)
+    /// );
+    /// assert_eq!(
+    ///     OvertureTheme::from_str_loose("road"),
+    ///     Some(OvertureTheme::Transportation)
+    /// );
+    /// assert!(OvertureTheme::from_str_loose("unknown").is_none());
+    /// ```
     pub fn from_str_loose(s: &str) -> Option<Self> {
         let theme = s.to_lowercase();
         match theme.as_str() {
@@ -102,6 +131,32 @@ pub enum ThemePriority {
 }
 
 /// Parameters controlling Overture Maps data integration.
+///
+/// `cache_ttl_secs` controls how long a cached GeoJSON entry is considered
+/// fresh; entries older than the TTL are treated as misses and re-fetched
+/// (ARC-001). `None` means "use the default ~30-day TTL"; `Some(0)` disables
+/// the cache (every fetch hits the CLI). Constructing via [`Default`] yields
+/// `None`, equivalent to the documented default.
+///
+/// # Examples
+///
+/// ```
+/// use par_osm_rust::overture::{OvertureParams, OvertureTheme};
+///
+/// // Default: Overture disabled, all themes, ~30-day cache TTL.
+/// let default = OvertureParams::default();
+/// assert!(!default.enabled);
+/// assert_eq!(default.themes.len(), OvertureTheme::all().len());
+///
+/// // Enable just the building theme and shorten the cache TTL to one day.
+/// let params = OvertureParams {
+///     enabled: true,
+///     themes: vec![OvertureTheme::Building],
+///     cache_ttl_secs: Some(24 * 60 * 60),
+///     ..Default::default()
+/// };
+/// assert!(params.enabled);
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OvertureParams {
     /// Whether Overture should be fetched. Defaults to `false`.
@@ -112,6 +167,12 @@ pub struct OvertureParams {
     pub priority: HashMap<OvertureTheme, ThemePriority>,
     /// Timeout for each Overture CLI download command.
     pub timeout_secs: u64,
+    /// Maximum age in seconds for a cache entry to be considered fresh
+    /// (ARC-001). `None` selects the default ~30-day TTL; `Some(0)` disables
+    /// the cache. Stored as seconds so the struct remains `Serialize`/`Deserialize`
+    /// without an extra serde helper for `Duration`.
+    #[serde(default)]
+    pub cache_ttl_secs: Option<u64>,
 }
 
 impl Default for OvertureParams {
@@ -121,6 +182,7 @@ impl Default for OvertureParams {
             themes: OvertureTheme::all(),
             priority: HashMap::new(),
             timeout_secs: 120,
+            cache_ttl_secs: None,
         }
     }
 }
@@ -132,6 +194,18 @@ impl OvertureParams {
             .get(&theme)
             .copied()
             .unwrap_or(ThemePriority::Both)
+    }
+
+    /// Resolve the effective cache TTL as a [`Duration`].
+    ///
+    /// `None` (the default) selects the documented ~30-day TTL. `Some(0)`
+    /// disables the cache by yielding a zero-length TTL, which forces every
+    /// read to miss. Any other `Some(secs)` is returned verbatim. ARC-001.
+    pub fn cache_ttl(&self) -> Duration {
+        match self.cache_ttl_secs {
+            None => Duration::from_secs(OVERTURE_CACHE_DEFAULT_TTL_SECS),
+            Some(secs) => Duration::from_secs(secs),
+        }
     }
 }
 
@@ -150,12 +224,38 @@ impl OvertureParams {
 const CLI_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
 const CLI_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
-/// Check whether the `overturemaps` CLI is available on the system PATH.
+/// Resolve the `overturemaps` CLI binary path (SEC-010).
+///
+/// Resolution order:
+/// 1. `PAR_OSM_OVERTURE_CLI` environment override, if it points to an existing
+///    absolute path. Absolute paths are exec'd directly, bypassing PATH lookup
+///    (which is vulnerable to binary-hijack in multi-user / shared-PATH
+///    setups where another user can shadow `overturemaps` earlier on PATH).
+/// 2. Fall back to the bare program name `"overturemaps"`, resolved by the
+///    operating system via `PATH` (current default behavior).
+///
+/// Relative paths and paths to non-existent files silently fall back to the
+/// PATH lookup so a misconfigured override never blocks a fetch.
+fn resolve_overture_cli() -> PathBuf {
+    if let Ok(raw) = std::env::var(OVERTURE_CLI_ENV_OVERRIDE) {
+        let path = PathBuf::from(&raw);
+        if path.is_absolute() && path.exists() {
+            return path;
+        }
+        log::debug!(
+            "PAR_OSM_OVERTURE_CLI='{raw}' is not an absolute path to an existing file; falling back to PATH lookup"
+        );
+    }
+    PathBuf::from("overturemaps")
+}
+
+/// Check whether the `overturemaps` CLI is available on the system PATH (or
+/// via the `PAR_OSM_OVERTURE_CLI` override — see [`resolve_overture_cli`]).
 ///
 /// Runs `overturemaps --version` with a short timeout.  Returns `true` if
 /// the command succeeds (exit code 0), `false` otherwise.
 pub fn is_cli_available() -> bool {
-    let Ok(mut child) = std::process::Command::new("overturemaps")
+    let Ok(mut child) = std::process::Command::new(resolve_overture_cli())
         .arg("--version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -179,6 +279,66 @@ pub fn is_cli_available() -> bool {
             Err(_) => return false,
         }
     }
+}
+
+/// Best-effort probe of the `overturemaps` CLI version string (ARC-001).
+///
+/// Spawn-and-poll `overturemaps --version`, capturing stdout. Returns the
+/// first non-empty trimmed line of stdout on success. On any failure
+/// (spawn error, non-zero exit, timeout, malformed UTF-8), returns
+/// `"unknown"` so the caller can still fold *something* into the cache key
+/// without blocking the fetch. Cached per-process via [`OnceLock`].
+fn probe_cli_version_uncached() -> String {
+    let cli = resolve_overture_cli();
+    let Ok(mut child) = std::process::Command::new(&cli)
+        .arg("--version")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return "unknown".to_string();
+    };
+
+    let start = Instant::now();
+    let exit_status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if start.elapsed() >= CLI_CHECK_TIMEOUT {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return "unknown".to_string();
+                }
+                std::thread::sleep(CLI_POLL_INTERVAL);
+            }
+            Err(_) => return "unknown".to_string(),
+        }
+    };
+
+    if !exit_status.success() {
+        return "unknown".to_string();
+    }
+
+    let Some(mut stdout) = child.stdout.take() else {
+        return "unknown".to_string();
+    };
+    let mut buf = String::new();
+    if stdout.read_to_string(&mut buf).is_err() {
+        return "unknown".to_string();
+    }
+    buf.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+/// Process-wide cached `overturemaps` CLI version. Probed once on first use
+/// (ARC-001); subsequent calls return the cached value without re-shelling
+/// out. Probing failure yields `"unknown"`.
+fn cached_cli_version() -> &'static str {
+    static CACHED: OnceLock<String> = OnceLock::new();
+    CACHED.get_or_init(probe_cli_version_uncached)
 }
 
 const STDERR_SNIPPET_LIMIT: usize = 4096;
@@ -255,7 +415,35 @@ fn wait_with_stderr_file_timeout(
 
 // ── GeoJSON download via CLI ──────────────────────────────────────────────
 
+/// Validate a `cli_type` string before passing it to the `overturemaps` CLI
+/// (SEC-012).
+///
+/// The crate's own use is safe (themes come from [`OvertureTheme::cli_types`]),
+/// but [`fetch_geojson_for_type`] is `pub` and an external caller could pass
+/// user input. A `cli_type` containing `-` or whitespace enables argument
+/// injection against the CLI's arg parser (e.g. `--output=...` would be
+/// honored as a flag, not a positional `--type` value). Reject those shapes
+/// at the public boundary; the shell-out itself is already arg-vector based
+/// (no shell), so this is the only remaining injection vector.
+fn validate_cli_type(cli_type: &str) -> Result<()> {
+    if cli_type.is_empty() {
+        bail!("overturemaps cli_type must not be empty");
+    }
+    if cli_type.contains('-') || cli_type.chars().any(char::is_whitespace) {
+        bail!(
+            "overturemaps cli_type '{cli_type}' rejected: contains '-' or whitespace \
+             (argument-injection guard, SEC-012)"
+        );
+    }
+    Ok(())
+}
+
 /// Download Overture GeoJSON for a single CLI type and bounding box.
+///
+/// Honors the `PAR_OSM_OVERTURE_CLI` environment override for the binary
+/// path (see [`resolve_overture_cli`], SEC-010). The shell-out is
+/// arg-vector based (no shell); `cli_type` is validated by
+/// [`validate_cli_type`] to reject argument-injection attempts (SEC-012).
 ///
 /// Invokes:
 /// ```text
@@ -265,6 +453,7 @@ fn wait_with_stderr_file_timeout(
 /// # Arguments
 ///
 /// * `cli_type` – The Overture type string (e.g. `"building"`, `"segment"`).
+///   Must not contain `-` or whitespace.
 /// * `bbox` – `(min_lat, min_lon, max_lat, max_lon)` bounding box.
 /// * `timeout_secs` – Maximum wall-clock seconds to wait for the CLI.
 ///
@@ -277,6 +466,8 @@ pub fn fetch_geojson_for_type(
     bbox: (f64, f64, f64, f64),
     timeout_secs: u64,
 ) -> Result<String> {
+    validate_cli_type(cli_type)?;
+
     let (min_lat, min_lon, max_lat, max_lon) = bbox;
     // Overture CLI expects W,S,E,N order (min_lon, min_lat, max_lon, max_lat).
     let bbox_str = format!("{min_lon},{min_lat},{max_lon},{max_lat}");
@@ -297,7 +488,8 @@ pub fn fetch_geojson_for_type(
         .reopen()
         .context("opening temp file for overturemaps stderr")?;
 
-    let child = std::process::Command::new("overturemaps")
+    let cli_path = resolve_overture_cli();
+    let child = std::process::Command::new(&cli_path)
         .arg("download")
         .arg("-f")
         .arg("geojson")
@@ -310,7 +502,7 @@ pub fn fetch_geojson_for_type(
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::from(stderr_file))
         .spawn()
-        .context("spawning overturemaps CLI")?;
+        .with_context(|| format!("spawning overturemaps CLI at {}", cli_path.display()))?;
 
     let (status, stderr) = wait_with_stderr_file_timeout(
         child,
@@ -394,6 +586,42 @@ fn coords_to_nodes(
         }
     }
     (node_refs, nodes)
+}
+
+/// Build one way from a coordinate ring/line, appending it (and any new nodes)
+/// to the running accumulators. Shared by the LineString / Polygon /
+/// MultiPolygon branches of [`parse_overture_geojson`] (QA-006).
+///
+/// Behavior preserved exactly from the prior inlined branches:
+/// - If `coords` produces zero valid node refs, nothing is pushed.
+/// - Otherwise a synthetic way ID is allocated, the way is appended with
+///   `tags` (moved), and the new nodes are merged into `nodes`.
+///
+/// Argument count exceeds clippy's default threshold because the four
+/// bounding-box accumulators are passed individually, mirroring the existing
+/// `coord_to_node` / `coords_to_nodes` style. Bundling them into a struct
+/// would require touching those helpers too, which is out of scope for this
+/// dedupe pass (QA-006).
+#[allow(clippy::too_many_arguments)]
+fn push_way_from_coords(
+    coords: &[Value],
+    id_alloc: &mut OvertureIdAllocator,
+    nodes: &mut HashMap<i64, OsmNode>,
+    ways_with_ids: &mut Vec<(i64, OsmWay)>,
+    tags: HashMap<String, String>,
+    min_lat: &mut f64,
+    min_lon: &mut f64,
+    max_lat: &mut f64,
+    max_lon: &mut f64,
+) {
+    let (node_refs, new_nodes) =
+        coords_to_nodes(coords, id_alloc, min_lat, min_lon, max_lat, max_lon);
+    if node_refs.is_empty() {
+        return;
+    }
+    let way_id = id_alloc.next_id();
+    ways_with_ids.push((way_id, OsmWay { tags, node_refs }));
+    nodes.extend(new_nodes);
 }
 
 /// Map an Overture place category string to the appropriate OSM primary key.
@@ -640,19 +868,17 @@ pub fn parse_overture_geojson(geojson_str: &str, theme: OvertureTheme) -> Result
 
             "LineString" => {
                 if let Some(coords) = coordinates.and_then(|c| c.as_array()) {
-                    let (node_refs, new_nodes) = coords_to_nodes(
+                    push_way_from_coords(
                         coords,
                         &mut id_alloc,
+                        &mut nodes,
+                        &mut ways_with_ids,
+                        tags,
                         &mut min_lat,
                         &mut min_lon,
                         &mut max_lat,
                         &mut max_lon,
                     );
-                    if !node_refs.is_empty() {
-                        let way_id = id_alloc.next_id();
-                        ways_with_ids.push((way_id, OsmWay { tags, node_refs }));
-                        nodes.extend(new_nodes);
-                    }
                 }
             }
 
@@ -663,19 +889,17 @@ pub fn parse_overture_geojson(geojson_str: &str, theme: OvertureTheme) -> Result
                     .and_then(|rings| rings.first())
                     .and_then(|r| r.as_array())
                 {
-                    let (node_refs, new_nodes) = coords_to_nodes(
+                    push_way_from_coords(
                         outer_ring,
                         &mut id_alloc,
+                        &mut nodes,
+                        &mut ways_with_ids,
+                        tags,
                         &mut min_lat,
                         &mut min_lon,
                         &mut max_lat,
                         &mut max_lon,
                     );
-                    if !node_refs.is_empty() {
-                        let way_id = id_alloc.next_id();
-                        ways_with_ids.push((way_id, OsmWay { tags, node_refs }));
-                        nodes.extend(new_nodes);
-                    }
                 }
             }
 
@@ -688,25 +912,20 @@ pub fn parse_overture_geojson(geojson_str: &str, theme: OvertureTheme) -> Result
                             .and_then(|rings| rings.first())
                             .and_then(|r| r.as_array())
                         {
-                            let (node_refs, new_nodes) = coords_to_nodes(
+                            // `tags` is cloned per polygon so each ring gets
+                            // its own copy; the original is dropped at the
+                            // end of the arm.
+                            push_way_from_coords(
                                 outer_ring,
                                 &mut id_alloc,
+                                &mut nodes,
+                                &mut ways_with_ids,
+                                tags.clone(),
                                 &mut min_lat,
                                 &mut min_lon,
                                 &mut max_lat,
                                 &mut max_lon,
                             );
-                            if !node_refs.is_empty() {
-                                let way_id = id_alloc.next_id();
-                                ways_with_ids.push((
-                                    way_id,
-                                    OsmWay {
-                                        tags: tags.clone(),
-                                        node_refs,
-                                    },
-                                ));
-                                nodes.extend(new_nodes);
-                            }
                         }
                     }
                 }
@@ -737,18 +956,27 @@ pub fn parse_overture_geojson(geojson_str: &str, theme: OvertureTheme) -> Result
 
 // ── Overture cache ────────────────────────────────────────────────────────
 
-/// Serialised metadata stored alongside the `.geojson` cache file.
+/// Metadata stored beside cached Overture GeoJSON files (DOC-010: doc comment
+/// now precedes the derive so rustdoc attaches it to the struct).
+///
+/// Carries the `overturemaps` CLI version that wrote the entry and a written-at
+/// timestamp so [`overture_cache_read`] can enforce the TTL (ARC-001).
 #[derive(Debug, Serialize, Deserialize)]
-/// Metadata stored beside cached Overture GeoJSON files.
 pub struct OvertureCacheMeta {
     /// Bounding box `[south, west, north, east]` for the cached download.
     pub bbox: [f64; 4],
     /// Overture CLI type value, such as `place`, `building`, or `segment`.
     pub cli_type: String,
-    /// UTC creation timestamp.
+    /// UTC creation timestamp (also serves as the entry's written-at time).
     pub created_at: DateTime<Utc>,
     /// GeoJSON payload size in bytes.
     pub size_bytes: u64,
+    /// First non-empty line of `overturemaps --version` stdout at write time
+    /// (ARC-001). Folded into the cache key so a CLI upgrade invalidates
+    /// entries written under an older version. Older entries written before
+    /// this field existed deserialize as an empty string.
+    #[serde(default)]
+    pub cli_version: String,
 }
 
 /// Return the Overture GeoJSON cache directory, creating it if needed.
@@ -767,6 +995,11 @@ pub fn overture_cache_dir() -> PathBuf {
 
 /// Build a deterministic SHA-256 cache key from a bounding box and CLI type.
 ///
+/// This is the legacy v1 cache key, preserved for backward compatibility with
+/// external callers; it is **not** version-aware, so a CLI upgrade will reuse
+/// stale entries. Internal fetch paths use [`overture_cache_key_with_version`]
+/// instead (ARC-001).
+///
 /// Coordinates are snapped to 4 decimal places (~11 m) so small UI drags
 /// reuse the same entry.
 pub fn overture_cache_key(bbox: (f64, f64, f64, f64), cli_type: &str) -> String {
@@ -776,9 +1009,76 @@ pub fn overture_cache_key(bbox: (f64, f64, f64, f64), cli_type: &str) -> String 
     hash.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Return cached GeoJSON for `key`, or `None` if absent or unreadable.
-pub fn overture_cache_read(dir: &Path, key: &str) -> Option<String> {
+/// Build a version-aware SHA-256 cache key (ARC-001).
+///
+/// Like [`overture_cache_key`] but folds the `overturemaps` CLI version into
+/// the canonical form so a CLI upgrade produces a different key and forces
+/// a re-fetch under the new version. An empty `cli_version` is normalized
+/// to `"unknown"` so probing failures still produce a stable, distinct key.
+///
+/// The canonical form is `overture|v2|{cli_version}|{s},{w},{n},{e}|{type}`,
+/// distinct from the v1 form, so any pre-existing v1 entries simply miss
+/// (re-fetch) on first read after the upgrade — accepted per ARC-001.
+pub fn overture_cache_key_with_version(
+    bbox: (f64, f64, f64, f64),
+    cli_type: &str,
+    cli_version: &str,
+) -> String {
+    let (s, w, n, e) = bbox;
+    let version = if cli_version.is_empty() {
+        "unknown"
+    } else {
+        cli_version
+    };
+    let canonical = format!("overture|v2|{version}|{s:.4},{w:.4},{n:.4},{e:.4}|{cli_type}");
+    let hash = Sha256::digest(canonical.as_bytes());
+    hash.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Return cached GeoJSON for `key`, or `None` if absent, unreadable, or older
+/// than `ttl` (ARC-001).
+///
+/// `ttl` is the maximum entry age; `None` disables TTL enforcement (read
+/// whatever is on disk). When `ttl` is `Some(_)`, the paired `.meta.json`
+/// is read for the `created_at` timestamp; an entry whose age exceeds `ttl`,
+/// a missing/unreadable/expired meta file, or a missing geojson file all
+/// yield `None` (treated as a miss → caller re-fetches).
+pub fn overture_cache_read(dir: &Path, key: &str, ttl: Option<Duration>) -> Option<String> {
     let path = dir.join(format!("{key}.geojson"));
+    if let Some(ttl) = ttl {
+        let meta_path = dir.join(format!("{key}.meta.json"));
+        let meta = std::fs::read_to_string(&meta_path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<OvertureCacheMeta>(&raw).ok());
+        let created_at = match meta {
+            Some(m) => m.created_at,
+            None => {
+                log::debug!(
+                    "Overture cache miss for {key}: no readable meta (TTL cannot be enforced)"
+                );
+                return None;
+            }
+        };
+        // Compare in SystemTime space so an absurdly large TTL (one that would
+        // overflow chrono's internal TimeDelta) is handled correctly: a future
+        // `created_at` (clock skew / tampering) is also treated as a miss.
+        let created_system: SystemTime = created_at.into();
+        match SystemTime::now().duration_since(created_system) {
+            Ok(elapsed) if elapsed > ttl => {
+                log::debug!(
+                    "Overture cache miss for {key}: entry age {:.0}s exceeds TTL {:.0}s",
+                    elapsed.as_secs(),
+                    ttl.as_secs()
+                );
+                return None;
+            }
+            Ok(_) => {} // fresh — fall through and read the geojson
+            Err(_) => {
+                log::debug!("Overture cache miss for {key}: created_at is in the future");
+                return None;
+            }
+        }
+    }
     match std::fs::read_to_string(&path) {
         Ok(s) => Some(s),
         Err(e) => {
@@ -788,12 +1088,15 @@ pub fn overture_cache_read(dir: &Path, key: &str) -> Option<String> {
     }
 }
 
-/// Atomically write `geojson` + metadata for `key`.
+/// Atomically write `geojson` + metadata for `key` (ARC-001: stores
+/// `cli_version` in the meta sidecar so TTL lookups can be paired with the
+/// version that wrote the entry).
 pub fn overture_cache_write(
     dir: &Path,
     key: &str,
     bbox: (f64, f64, f64, f64),
     cli_type: &str,
+    cli_version: &str,
     geojson: &str,
 ) -> Result<()> {
     let (s, w, n, e) = bbox;
@@ -812,6 +1115,7 @@ pub fn overture_cache_write(
         cli_type: cli_type.to_string(),
         created_at: Utc::now(),
         size_bytes,
+        cli_version: cli_version.to_string(),
     };
     std::fs::write(&meta_tmp, serde_json::to_string(&meta)?)?;
     std::fs::rename(&meta_tmp, &meta_path)?;
@@ -819,15 +1123,24 @@ pub fn overture_cache_write(
     Ok(())
 }
 
-/// A single Overture cache entry for listing purposes.
+/// A single Overture cache entry returned by [`list_overture_areas`]
+/// (DOC-010: doc comment now precedes the derive so rustdoc attaches it).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// A single Overture cache entry returned by [`list_overture_areas`].
 pub struct OvertureCacheEntry {
+    /// Cache key (SHA-256 hex) the entry is stored under.
     pub key: String,
+    /// Bounding box `[south, west, north, east]`.
     pub bbox: [f64; 4],
+    /// Overture CLI type value (e.g. `building`, `segment`).
     pub cli_type: String,
+    /// UTC creation timestamp of the entry.
     pub created_at: DateTime<Utc>,
+    /// GeoJSON payload size in bytes.
     pub size_bytes: u64,
+    /// `overturemaps` CLI version string that wrote the entry (ARC-001).
+    /// Empty for entries written before the field existed.
+    #[serde(default)]
+    pub cli_version: String,
 }
 
 /// List all valid Overture cache entries.
@@ -861,6 +1174,7 @@ pub fn list_overture_areas() -> Vec<OvertureCacheEntry> {
             cli_type: meta.cli_type,
             created_at: meta.created_at,
             size_bytes: meta.size_bytes,
+            cli_version: meta.cli_version,
         });
     }
     result
@@ -935,25 +1249,81 @@ fn empty_osm_data() -> OsmData {
     )
 }
 
-/// Fetch and parse Overture Maps data for all enabled themes, merging into a
-/// single [`OsmData`].
+/// Fetch + cache + parse a single Overture theme/CLI-type pair (QA-007).
+///
+/// Shared by [`fetch_overture_data`] (which propagates the error) and
+/// [`fetch_overture_data_best_effort`] (which logs and skips). Returns the
+/// parsed [`OsmData`] for the single theme. Cache key is version-aware
+/// ([`overture_cache_key_with_version`]) and reads enforce
+/// [`OvertureParams::cache_ttl`] (ARC-001).
+fn fetch_one_theme(
+    theme: OvertureTheme,
+    cli_type: &'static str,
+    bbox: (f64, f64, f64, f64),
+    params: &OvertureParams,
+    cache_dir: &Path,
+    cli_version: &str,
+) -> Result<OsmData> {
+    let key = overture_cache_key_with_version(bbox, cli_type, cli_version);
+    let ttl = params.cache_ttl();
+
+    let geojson = match overture_cache_read(cache_dir, &key, Some(ttl)) {
+        Some(cached) => {
+            log::debug!("Overture cache hit for {cli_type} (key {key})");
+            cached
+        }
+        None => {
+            log::debug!("Overture cache miss for {cli_type} — downloading");
+            let fetched = fetch_geojson_for_type(cli_type, bbox, params.timeout_secs)
+                .with_context(|| format!("fetching Overture data for type '{cli_type}'"))?;
+            overture_cache_write(cache_dir, &key, bbox, cli_type, cli_version, &fetched)
+                .with_context(|| format!("caching Overture data for type '{cli_type}'"))?;
+            fetched
+        }
+    };
+
+    parse_overture_geojson(&geojson, theme)
+        .with_context(|| format!("parsing Overture GeoJSON for type '{cli_type}'"))
+}
+
+/// Fetch Overture Maps data for the enabled themes in `params` and normalize
+/// it into a single [`OsmData`] (DOC-011: removed the duplicated summary that
+/// previously appeared around the `# Errors` section).
 ///
 /// For each CLI type belonging to each requested theme:
-/// 1. Check the disk cache.
+/// 1. Check the disk cache (version-aware key + TTL, ARC-001).
 /// 2. On cache miss, invoke the `overturemaps` CLI to download GeoJSON.
-/// 3. Write the result to cache.
-/// 4. Parse the GeoJSON into `OsmData` and merge.
-///
-/// # Errors
-///
-/// Returns an error if `params.enabled` is false, the CLI is not installed,
-/// or any theme fetch or parse fails.
-/// Fetch Overture data for the enabled themes in `params` and normalize it into [`OsmData`].
+/// 3. Write the result to cache with the probed CLI version.
+/// 4. Parse the GeoJSON into [`OsmData`] and merge.
 ///
 /// This function shells out to the optional `overturemaps` CLI and may perform
 /// network I/O. The returned data can be merged with OSM data via
 /// [`crate::sources::merge_source_data`] or fetched through the higher-level
 /// [`crate::sources::fetch_map_data`] orchestrator.
+///
+/// # Errors
+///
+/// Returns an error if `params.enabled` is false, the CLI is not installed,
+/// or any theme fetch or parse fails.
+///
+/// # Examples
+///
+/// ```no_run
+/// use par_osm_rust::overture::{fetch_overture_data, OvertureParams, OvertureTheme};
+///
+/// # fn main() -> anyhow::Result<()> {
+/// let bbox = (38.0, -121.0, 38.01, -120.99); // south, west, north, east
+/// let params = OvertureParams {
+///     enabled: true,
+///     themes: vec![OvertureTheme::Place],
+///     ..Default::default()
+/// };
+/// let mut progress = |_: f32, _: &str| {};
+/// let data = fetch_overture_data(bbox, &params, &mut progress)?;
+/// println!("{} ways", data.iter_ways().count());
+/// # Ok(())
+/// # }
+/// ```
 pub fn fetch_overture_data(
     bbox: (f64, f64, f64, f64),
     params: &OvertureParams,
@@ -970,14 +1340,16 @@ pub fn fetch_overture_data(
         );
     }
 
+    let cli_version = cached_cli_version();
     let theme_names: Vec<String> = params.themes.iter().map(|t| t.to_string()).collect();
     log::info!(
-        "Starting Overture Maps fetch (bbox: {:.4},{:.4},{:.4},{:.4}, themes: {})",
+        "Starting Overture Maps fetch (bbox: {:.4},{:.4},{:.4},{:.4}, themes: {}, cli_version: {})",
         bbox.0,
         bbox.1,
         bbox.2,
         bbox.3,
-        theme_names.join(", ")
+        theme_names.join(", "),
+        cli_version,
     );
 
     let cache_dir = overture_cache_dir();
@@ -997,21 +1369,7 @@ pub fn fetch_overture_data(
         let pct = i as f32 / total;
         progress_cb(pct, &format!("Fetching Overture {cli_type}…"));
 
-        let key = overture_cache_key(bbox, cli_type);
-        let geojson = if let Some(cached) = overture_cache_read(&cache_dir, &key) {
-            log::debug!("Overture cache hit for {cli_type} (key {key})");
-            cached
-        } else {
-            log::debug!("Overture cache miss for {cli_type} — downloading");
-            let fetched = fetch_geojson_for_type(cli_type, bbox, params.timeout_secs)
-                .with_context(|| format!("fetching Overture data for type '{cli_type}'"))?;
-            overture_cache_write(&cache_dir, &key, bbox, cli_type, &fetched)
-                .with_context(|| format!("caching Overture data for type '{cli_type}'"))?;
-            fetched
-        };
-
-        let data = parse_overture_geojson(&geojson, *theme)
-            .with_context(|| format!("parsing Overture GeoJSON for type '{cli_type}'"))?;
+        let data = fetch_one_theme(*theme, cli_type, bbox, params, &cache_dir, cli_version)?;
         accumulated.merge(data);
     }
 
@@ -1051,6 +1409,7 @@ pub fn fetch_overture_data_best_effort(
         return empty_osm_data();
     }
 
+    let cli_version = cached_cli_version();
     let cache_dir = overture_cache_dir();
 
     let pairs: Vec<(OvertureTheme, &'static str)> = params
@@ -1066,30 +1425,9 @@ pub fn fetch_overture_data_best_effort(
         let pct = i as f32 / total;
         progress_cb(pct, &format!("Fetching Overture {cli_type}…"));
 
-        let key = overture_cache_key(bbox, cli_type);
-        let geojson = if let Some(cached) = overture_cache_read(&cache_dir, &key) {
-            cached
-        } else {
-            match fetch_geojson_for_type(cli_type, bbox, params.timeout_secs) {
-                Ok(fetched) => {
-                    if let Err(e) = overture_cache_write(&cache_dir, &key, bbox, cli_type, &fetched)
-                    {
-                        log::warn!("Failed to write Overture cache for {cli_type}: {e}");
-                    }
-                    fetched
-                }
-                Err(e) => {
-                    log::warn!("Skipping Overture type '{cli_type}': {e}");
-                    continue;
-                }
-            }
-        };
-
-        match parse_overture_geojson(&geojson, *theme) {
+        match fetch_one_theme(*theme, cli_type, bbox, params, &cache_dir, cli_version) {
             Ok(data) => accumulated.merge(data),
-            Err(e) => {
-                log::warn!("Failed to parse Overture GeoJSON for '{cli_type}': {e}");
-            }
+            Err(e) => log::warn!("Skipping Overture type '{cli_type}': {e}"),
         }
     }
 
@@ -1114,6 +1452,15 @@ mod tests {
     impl Drop for PathGuard {
         fn drop(&mut self) {
             match &self.original_path {
+                // SAFETY (SEC-007): env mutation became `unsafe` in Rust 1.85
+                // (Edition 2024) because it is not thread-safe across the
+                // whole process. This test module serializes all such
+                // mutations behind `PATH_LOCK` (a single Mutex held for the
+                // duration of each test that touches PATH), so no other code
+                // in this crate can read or write PATH concurrently. We do
+                // not pull in `temp_env` because SEC-007 forbids editing
+                // Cargo.toml in this wave. The original value is restored on
+                // drop so the mutation is also scoped to the test.
                 Some(path) => unsafe { std::env::set_var("PATH", path) },
                 None => unsafe { std::env::remove_var("PATH") },
             }
@@ -1127,6 +1474,9 @@ mod tests {
             paths.extend(std::env::split_paths(original));
         }
         let joined = std::env::join_paths(paths).expect("join PATH entries");
+        // SAFETY (SEC-007): see `PathGuard::drop` — caller holds `PATH_LOCK`
+        // for the duration of this test, and the original value is restored
+        // when the returned `PathGuard` drops.
         unsafe { std::env::set_var("PATH", joined) };
 
         PathGuard { original_path }
@@ -1496,14 +1846,142 @@ exit 23
     }
 
     #[test]
+    fn overture_cache_key_with_version_is_deterministic() {
+        let bbox = (51.5, -0.13, 51.52, -0.10);
+        let k1 = overture_cache_key_with_version(bbox, "building", "0.4.0");
+        let k2 = overture_cache_key_with_version(bbox, "building", "0.4.0");
+        assert_eq!(k1, k2);
+        assert_eq!(k1.len(), 64, "SHA-256 hex should be 64 chars");
+    }
+
+    #[test]
+    fn overture_cache_key_with_version_varies_by_cli_version() {
+        // ARC-001: a CLI upgrade must invalidate the cache.
+        let bbox = (51.5, -0.13, 51.52, -0.10);
+        let k_old = overture_cache_key_with_version(bbox, "building", "0.4.0");
+        let k_new = overture_cache_key_with_version(bbox, "building", "0.5.0");
+        assert_ne!(k_old, k_new);
+    }
+
+    #[test]
+    fn overture_cache_key_with_version_differs_from_legacy_key() {
+        // ARC-001: the new v2 canonical form must not collide with v1.
+        let bbox = (51.5, -0.13, 51.52, -0.10);
+        let legacy = overture_cache_key(bbox, "building");
+        let versioned = overture_cache_key_with_version(bbox, "building", "0.4.0");
+        assert_ne!(legacy, versioned);
+    }
+
+    #[test]
     fn overture_cache_write_read_roundtrip() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let bbox = (51.5_f64, -0.13_f64, 51.52_f64, -0.10_f64);
-        let key = overture_cache_key(bbox, "building");
+        let key = overture_cache_key_with_version(bbox, "building", "test");
         let geojson = r#"{"type":"FeatureCollection","features":[]}"#;
 
-        overture_cache_write(tmp.path(), &key, bbox, "building", geojson).unwrap();
-        let result = overture_cache_read(tmp.path(), &key);
+        overture_cache_write(tmp.path(), &key, bbox, "building", "test", geojson).unwrap();
+        // `None` disables TTL enforcement.
+        let result = overture_cache_read(tmp.path(), &key, None);
         assert_eq!(result.as_deref(), Some(geojson));
+    }
+
+    #[test]
+    fn overture_cache_read_returns_none_when_ttl_exceeded() {
+        // ARC-001: an entry older than the TTL is treated as a miss.
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let bbox = (51.5_f64, -0.13_f64, 51.52_f64, -0.10_f64);
+        let key = overture_cache_key_with_version(bbox, "building", "test");
+        let geojson = r#"{"type":"FeatureCollection","features":[]}"#;
+
+        // Hand-write a meta file whose `created_at` is well in the past so
+        // any positive TTL is exceeded.
+        let meta_path = tmp.path().join(format!("{key}.meta.json"));
+        let geojson_path = tmp.path().join(format!("{key}.geojson"));
+        std::fs::write(&geojson_path, geojson).unwrap();
+        let past = Utc::now() - chrono::Duration::days(365);
+        let meta = serde_json::json!({
+            "bbox": [bbox.0, bbox.1, bbox.2, bbox.3],
+            "cli_type": "building",
+            "created_at": past,
+            "size_bytes": geojson.len() as u64,
+            "cli_version": "test",
+        });
+        std::fs::write(&meta_path, meta.to_string()).unwrap();
+
+        // 1-second TTL — entry is a year old, so this must miss.
+        let result = overture_cache_read(tmp.path(), &key, Some(Duration::from_secs(1)));
+        assert!(
+            result.is_none(),
+            "expired entry should be treated as a miss"
+        );
+    }
+
+    #[test]
+    fn overture_cache_read_returns_data_when_entry_is_fresh() {
+        // ARC-001 counterpart: a freshly-written entry is a hit.
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let bbox = (51.5_f64, -0.13_f64, 51.52_f64, -0.10_f64);
+        let key = overture_cache_key_with_version(bbox, "building", "test");
+        let geojson = r#"{"type":"FeatureCollection","features":[]}"#;
+
+        overture_cache_write(tmp.path(), &key, bbox, "building", "test", geojson).unwrap();
+        // 30-day TTL — entry is seconds old, so this must hit.
+        let result = overture_cache_read(
+            tmp.path(),
+            &key,
+            Some(Duration::from_secs(30 * 24 * 60 * 60)),
+        );
+        assert_eq!(result.as_deref(), Some(geojson));
+    }
+
+    #[test]
+    fn overture_cache_read_returns_none_when_meta_missing_under_ttl() {
+        // ARC-001: when TTL is set but the meta file is absent/unreadable,
+        // we cannot enforce freshness — treat as a miss rather than serve
+        // potentially stale data without a timestamp.
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let bbox = (51.5_f64, -0.13_f64, 51.52_f64, -0.10_f64);
+        let key = overture_cache_key_with_version(bbox, "building", "test");
+        let geojson_path = tmp.path().join(format!("{key}.geojson"));
+        std::fs::write(
+            &geojson_path,
+            r#"{"type":"FeatureCollection","features":[]}"#,
+        )
+        .unwrap();
+
+        let result = overture_cache_read(tmp.path(), &key, Some(Duration::from_secs(60)));
+        assert!(result.is_none(), "missing meta under TTL must miss");
+    }
+
+    // ── SEC-012 argument-injection guard ────────────────────────────────
+
+    #[test]
+    fn validate_cli_type_rejects_dash_and_whitespace() {
+        // Bare theme name accepted.
+        assert!(validate_cli_type("building").is_ok());
+        assert!(validate_cli_type("land_use").is_ok()); // underscore, not dash
+
+        // Empty rejected.
+        assert!(validate_cli_type("").is_err());
+
+        // Argument-injection shapes rejected (would let the value be parsed
+        // as a CLI flag by overturemaps).
+        assert!(validate_cli_type("--output=/etc/passwd").is_err());
+        assert!(validate_cli_type("-t").is_err());
+        assert!(validate_cli_type("building segment").is_err());
+        assert!(validate_cli_type("building\tsegment").is_err());
+        assert!(validate_cli_type("\nbuilding").is_err());
+    }
+
+    #[test]
+    fn fetch_geojson_for_type_rejects_argument_injection() {
+        // SEC-012: a user-controlled cli_type must not reach the CLI as a flag.
+        let err = fetch_geojson_for_type("--output=/tmp/evil", (0.0, 0.0, 1.0, 1.0), 1)
+            .expect_err("dashed cli_type must be rejected before spawn");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("SEC-012") || msg.contains("argument-injection"),
+            "error should mention the SEC-012 guard, got: {msg}"
+        );
     }
 }
