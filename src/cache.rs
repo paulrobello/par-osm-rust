@@ -3,6 +3,7 @@
 use anyhow::{Context, Result};
 use serde::Serialize;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 const SHARED_CACHE_NAME: &str = "par-osm-rust";
@@ -11,19 +12,31 @@ const LEGACY_CACHE_NAME: &str = "osm-to-bedrock";
 /// Summary for migrating all known legacy cache directories.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct MigrationReport {
+    /// Migration result for the Overpass XML cache.
     pub overpass: CacheMigrationReport,
+    /// Migration result for the SRTM tile cache.
     pub srtm: CacheMigrationReport,
+    /// Migration result for the Overture GeoJSON cache.
     pub overture: CacheMigrationReport,
 }
 
 /// Summary for migrating one legacy cache directory into its shared location.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct CacheMigrationReport {
+    /// Legacy source directory inspected for entries to migrate.
     pub legacy_dir: PathBuf,
+    /// Shared destination directory entries were migrated into.
     pub shared_dir: PathBuf,
+    /// Number of legacy entries moved into the shared directory via rename.
     pub moved_files: usize,
+    /// Number of legacy entries copied into the shared directory (rename fell
+    /// back to copy, e.g. when crossing filesystem boundaries).
     pub copied_files: usize,
+    /// Number of legacy entries skipped (non-regular files, symlinks,
+    /// directories, or entries whose destination already differed).
     pub skipped_files: usize,
+    /// Number of legacy entries removed because an identical entry already
+    /// existed in the shared directory.
     pub removed_duplicate_files: usize,
 }
 
@@ -118,10 +131,15 @@ fn env_dir(name: &str) -> Option<PathBuf> {
 }
 
 fn platform_cache_root(app_name: &str) -> PathBuf {
-    if let Some(home) = env_dir("HOME") {
-        home.join(".cache").join(app_name)
-    } else if let Some(local) = env_dir("LOCALAPPDATA") {
+    // On Windows the conventional per-user application-data location is
+    // `LOCALAPPDATA`; native Windows installs should land there rather than
+    // under `HOME` (which is typically only set via MSYS/Cygwin/Git-Bash
+    // shells). Prefer `LOCALAPPDATA` when present, fall back to `HOME` for
+    // POSIX systems, and finally to the system temp dir. See QA-020.
+    if let Some(local) = env_dir("LOCALAPPDATA") {
         local.join(app_name)
+    } else if let Some(home) = env_dir("HOME") {
+        home.join(".cache").join(app_name)
     } else {
         std::env::temp_dir().join(app_name)
     }
@@ -148,7 +166,11 @@ fn migrate_legacy_cache_dir(subdir: &str) -> Result<CacheMigrationReport> {
         ..CacheMigrationReport::default()
     };
 
-    if !legacy_dir.exists() {
+    // Use `symlink_metadata` so a symlinked legacy dir is not traversed.
+    // `symlink_metadata` describes the path itself (not its target), so
+    // `is_dir()` is false for a symlink — defense against local data-exfil
+    // / OOM via hostile symlinks (SEC-006).
+    if !matches!(fs::symlink_metadata(&legacy_dir), Ok(m) if m.is_dir()) {
         return Ok(report);
     }
 
@@ -162,9 +184,18 @@ fn migrate_legacy_cache_dir(subdir: &str) -> Result<CacheMigrationReport> {
     {
         let entry = entry?;
         let src = entry.path();
-        if !src.is_file() {
-            report.skipped_files += 1;
-            continue;
+        // Skip symlinks (and any non-regular file) without following them.
+        // `symlink_metadata` describes the entry itself rather than its
+        // target, so `is_file()` is false for a symlink — a hostile
+        // symlinked legacy entry (e.g. one pointing at `/dev/zero` or any
+        // arbitrary target) is rejected here rather than migrated. See
+        // SEC-006.
+        match fs::symlink_metadata(&src) {
+            Ok(meta) if meta.is_file() => {}
+            _ => {
+                report.skipped_files += 1;
+                continue;
+            }
         }
         let dst = shared_dir.join(entry.file_name());
         migrate_file(&src, &dst, &mut report)?;
@@ -185,7 +216,10 @@ fn legacy_file_count(legacy_dir: &Path) -> Result<usize> {
     for entry in fs::read_dir(legacy_dir)
         .with_context(|| format!("reading legacy cache dir {}", legacy_dir.display()))?
     {
-        if entry?.path().is_file() {
+        let path = entry?.path();
+        // `symlink_metadata` so symlinked entries are not counted as files
+        // (SEC-006): `is_file()` is false for the symlink itself.
+        if matches!(fs::symlink_metadata(&path), Ok(m) if m.is_file()) {
             count += 1;
         }
     }
@@ -225,18 +259,83 @@ fn migrate_file(src: &Path, dst: &Path, report: &mut CacheMigrationReport) -> Re
     }
 }
 
+/// Maximum number of bytes examined by [`files_equal`] when comparing two
+/// cache entries.
+///
+/// Bounded IO defends against hostile or pathological inputs (e.g. an
+/// attacker-controlled symlinked `/dev/zero` target) while streaming with
+/// early-exit bounds peak memory to the chunk size. Two entries whose lengths
+/// match and whose first `FILES_EQUAL_MAX_BYTES` bytes match are treated as
+/// equal for migration dedup.
+const FILES_EQUAL_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Compare two cache entries by streaming their bytes with early exit on the
+/// first mismatch (SEC-006 / QA-016).
+///
+/// Returns `Ok(false)` if either path is not a regular file (symlinks are not
+/// followed), if the file lengths differ, if the byte streams differ within
+/// the first [`FILES_EQUAL_MAX_BYTES`] bytes, or if either stream ends before
+/// the cap is reached. Two non-symlinked regular files of equal length whose
+/// first `FILES_EQUAL_MAX_BYTES` bytes match are considered equal — sufficient
+/// for migration dedup since cache entries are content-addressed by bbox/URL.
 fn files_equal(a: &Path, b: &Path) -> Result<bool> {
+    // `symlink_metadata` so symlinked arguments are not followed (SEC-006).
     let a_meta =
-        fs::metadata(a).with_context(|| format!("reading metadata for {}", a.display()))?;
+        fs::symlink_metadata(a).with_context(|| format!("reading metadata for {}", a.display()))?;
     let b_meta =
-        fs::metadata(b).with_context(|| format!("reading metadata for {}", b.display()))?;
+        fs::symlink_metadata(b).with_context(|| format!("reading metadata for {}", b.display()))?;
+    if !a_meta.is_file() || !b_meta.is_file() {
+        return Ok(false);
+    }
     if a_meta.len() != b_meta.len() {
         return Ok(false);
     }
-    Ok(
-        fs::read(a).with_context(|| format!("reading {}", a.display()))?
-            == fs::read(b).with_context(|| format!("reading {}", b.display()))?,
-    )
+
+    // Stream-compare with early exit on first mismatch so two 25 MB SRTM1
+    // tiles that differ in the first KiB cost almost nothing (QA-016). Cap
+    // each stream at `FILES_EQUAL_MAX_BYTES` as a defense against unbounded
+    // inputs (SEC-006).
+    let mut reader_a = fs::File::open(a)
+        .with_context(|| format!("opening {}", a.display()))?
+        .take(FILES_EQUAL_MAX_BYTES);
+    let mut reader_b = fs::File::open(b)
+        .with_context(|| format!("opening {}", b.display()))?
+        .take(FILES_EQUAL_MAX_BYTES);
+
+    let mut buf_a = [0u8; 8192];
+    let mut buf_b = [0u8; 8192];
+    loop {
+        let read_a = read_fill(&mut reader_a, &mut buf_a)
+            .with_context(|| format!("reading {}", a.display()))?;
+        let read_b = read_fill(&mut reader_b, &mut buf_b)
+            .with_context(|| format!("reading {}", b.display()))?;
+        if read_a != read_b {
+            return Ok(false);
+        }
+        if read_a == 0 {
+            return Ok(true);
+        }
+        if buf_a[..read_a] != buf_b[..read_a] {
+            return Ok(false);
+        }
+    }
+}
+
+/// Read from `reader` into `buf` until `buf` is full or EOF, returning the
+/// number of bytes placed. Used by [`files_equal`] for chunked streaming
+/// comparison.
+fn read_fill<R: Read>(reader: &mut R, buf: &mut [u8]) -> Result<usize> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        let n = reader
+            .read(&mut buf[filled..])
+            .with_context(|| "filling read buffer")?;
+        if n == 0 {
+            break;
+        }
+        filled += n;
+    }
+    Ok(filled)
 }
 
 #[cfg(test)]
@@ -277,12 +376,19 @@ mod tests {
         }
 
         fn set_path(&self, key: &str, value: &Path) {
+            // SAFETY: `set_var` is `unsafe` under Edition 2024 because env
+            // mutation is process-wide and not thread-safe. The `env_lock()`
+            // Mutex held by every test in this module serializes all such
+            // mutations across the crate's tests, and `EnvSnapshot::drop`
+            // restores the captured original value on completion so no
+            // mutation leaks across tests.
             unsafe {
                 std::env::set_var(key, value);
             }
         }
 
         fn remove(&self, key: &str) {
+            // SAFETY: see `set_path` — Mutex-serialized and restored on drop.
             unsafe {
                 std::env::remove_var(key);
             }
@@ -292,6 +398,13 @@ mod tests {
     impl Drop for EnvSnapshot {
         fn drop(&mut self) {
             for (&key, value) in &self.values {
+                // SAFETY: env mutation is `unsafe` under Edition 2024
+                // (process-wide non-thread-safe). The `env_lock()` Mutex
+                // serializes every test in this module around the snapshot's
+                // lifetime; here we restore the captured value (or remove the
+                // key entirely if it was unset at capture time) so the process
+                // env is back to its original state before the next test takes
+                // the lock.
                 unsafe {
                     match value {
                         Some(value) => std::env::set_var(key, value),
@@ -336,6 +449,27 @@ mod tests {
 
         assert_eq!(shared_cache_root(), tmp.path().join("par-osm-rust"));
         assert_eq!(legacy_cache_root(), tmp.path().join("osm-to-bedrock"));
+    }
+
+    #[test]
+    fn roots_prefer_localappdata_when_both_set() {
+        // QA-020: on Windows both LOCALAPPDATA and HOME are typically set; the
+        // native Windows app-data location (LOCALAPPDATA) must win so cache
+        // entries land where native Windows applications and uninstallers
+        // expect them.
+        let _guard = env_lock().lock().unwrap();
+        let env = EnvSnapshot::capture();
+        isolate_cache_env(&env);
+        let tmp = TempDir::new().unwrap();
+        let local = tmp.path().join("localappdata");
+        let home = tmp.path().join("home");
+        fs::create_dir_all(&local).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        env.set_path("LOCALAPPDATA", &local);
+        env.set_path("HOME", &home);
+
+        assert_eq!(shared_cache_root(), local.join("par-osm-rust"));
+        assert_eq!(legacy_cache_root(), local.join("osm-to-bedrock"));
     }
 
     #[test]
@@ -747,5 +881,45 @@ mod tests {
             report.overture.moved_files + report.overture.copied_files,
             1
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn migration_skips_symlinked_legacy_entries() {
+        // SEC-006: a symlinked legacy entry must be skipped (not followed),
+        // defending against local data-exfil / OOM via hostile symlink targets
+        // such as `/dev/zero`. Regular entries in the same dir still migrate.
+        use std::os::unix::fs::symlink;
+        let _guard = env_lock().lock().unwrap();
+        let env = EnvSnapshot::capture();
+        isolate_cache_env(&env);
+        let tmp = TempDir::new().unwrap();
+        env.set_path("HOME", tmp.path());
+        let legacy = tmp.path().join(".cache/osm-to-bedrock/overpass");
+        fs::create_dir_all(&legacy).unwrap();
+        let target = tmp.path().join("evil-target");
+        fs::write(&target, "evil").unwrap();
+        // Hostile symlink: legacy entry that points elsewhere.
+        symlink(&target, legacy.join("link.xml")).unwrap();
+        // Legitimate regular file in the same legacy dir.
+        fs::write(legacy.join("real.xml"), "<osm />").unwrap();
+
+        let report = migrate_legacy_cache_dir("overpass").unwrap();
+
+        assert_eq!(report.skipped_files, 1);
+        assert_eq!(report.moved_files + report.copied_files, 1);
+        assert!(
+            tmp.path()
+                .join(".cache/par-osm-rust/overpass/real.xml")
+                .exists()
+        );
+        assert!(
+            !tmp.path()
+                .join(".cache/par-osm-rust/overpass/link.xml")
+                .exists()
+        );
+        // Symlink itself is left in place; target file is untouched.
+        assert!(legacy.join("link.xml").symlink_metadata().is_ok());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "evil");
     }
 }
