@@ -51,23 +51,27 @@ mod tests {
     use super::*;
     use crate::osm::FeatureSource;
     use chrono::Utc;
-    #[cfg(feature = "blocking")]
+    #[cfg(all(unix, feature = "blocking"))]
     use std::ffi::OsString;
-    #[cfg(feature = "blocking")]
+    #[cfg(all(unix, feature = "blocking"))]
     use std::sync::Mutex;
     use std::time::Duration;
-    #[cfg(feature = "blocking")]
+    #[cfg(all(unix, feature = "blocking"))]
     use std::time::Instant;
 
-    #[cfg(feature = "blocking")]
+    // The PATH-mutation helpers below are only consumed by the
+    // `#[cfg(all(unix, feature = "blocking"))]` subprocess test that installs a
+    // fake `overturemaps` binary. Gate them the same way so they are not
+    // flagged as dead code on Windows (where that test does not compile).
+    #[cfg(all(unix, feature = "blocking"))]
     static PATH_LOCK: Mutex<()> = Mutex::new(());
 
-    #[cfg(feature = "blocking")]
+    #[cfg(all(unix, feature = "blocking"))]
     struct PathGuard {
         original_path: Option<OsString>,
     }
 
-    #[cfg(feature = "blocking")]
+    #[cfg(all(unix, feature = "blocking"))]
     impl Drop for PathGuard {
         fn drop(&mut self) {
             match &self.original_path {
@@ -86,7 +90,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "blocking")]
+    #[cfg(all(unix, feature = "blocking"))]
     fn prepend_to_path(path: &std::path::Path) -> PathGuard {
         let original_path = std::env::var_os("PATH");
         let mut paths = vec![path.to_path_buf()];

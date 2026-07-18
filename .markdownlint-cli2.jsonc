@@ -13,9 +13,13 @@
   //   legitimately repeats heading text inside its Table of Contents and in
   //   its "Prefer This / Avoid This" example pairs, and the README's
   //   subsection names overlap conceptually across concerns.
+  // MD028 (no-blanks-blockquote): disabled because docs/DOCUMENTATION_STYLE_GUIDE.md
+  //   uses multi-paragraph blockquotes (with intentional blank separator lines)
+  //   in its "Prefer This / Avoid This" guidance blocks.
   "config": {
     "MD013": false,
-    "MD024": false
+    "MD024": false,
+    "MD028": false
   },
   // Never lint generated/build artifacts even if a future glob sweep picks
   // them up. The CI job already targets README.md and docs/, so these are
