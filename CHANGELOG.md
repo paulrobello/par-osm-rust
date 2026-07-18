@@ -9,7 +9,13 @@ Released versions are published to [crates.io](https://crates.io/crates/par-osm-
 
 ## [Unreleased]
 
-No changes since 0.2.0.
+No changes since 0.2.1.
+
+## [0.2.1] - 2026-07-18
+
+### Added
+
+- **`OsmData` read accessors.** `nodes()`, `ways()`, and `ways_by_id()` borrow the encapsulated `pub(crate)` fields (`&HashMap<i64, OsmNode>`, `&[OsmWay]`, `&HashMap<i64, usize>`). 0.2.0 introduced the encapsulation but shipped no public way to read these fields, so downstream consumers (`osm-to-bedrock`, `osm-world`) could not resolve way node references or multipolygon relation members. Purely additive; no behavioral change.
 
 ## [0.2.0] - 2026-07-18
 
@@ -190,7 +196,8 @@ OSM XML/PBF parsing, normalized `OsmData` interchange, SRTM tile download, HGT
 elevation sampling, atomic write-then-rename cache discipline, and the
 `sources::fetch_map_data` orchestration entry point.
 
-[Unreleased]: https://github.com/paulrobello/par-osm-rust/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/paulrobello/par-osm-rust/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/paulrobello/par-osm-rust/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/paulrobello/par-osm-rust/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/paulrobello/par-osm-rust/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/paulrobello/par-osm-rust/releases/tag/v0.1.0

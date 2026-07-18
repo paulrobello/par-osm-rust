@@ -237,7 +237,10 @@ The central type is `osm::OsmData`. The `ways` and `ways_by_id` fields are coupl
 
 - `new(nodes, ways, relations, bounds, poi_nodes, addr_nodes, tree_nodes)` constructs an `OsmData` and seeds `ways_by_id` from each way's `id`.
 - `push_way(way)` appends a way and updates `ways_by_id` atomically.
-- `iter_ways()` borrows the ways slice in insertion order.
+- `nodes()` borrows the node map keyed by OSM id (read view for the encapsulated `nodes` field).
+- `ways()` borrows the ways slice in insertion order (read view for `ways`).
+- `ways_by_id()` borrows the way-id → ways-index lookup map (read view for `ways_by_id`).
+- `iter_ways()` borrows the ways slice in insertion order (iterator form of `ways()`).
 - `way_id_at(index)` recovers a way's OSM id by index.
 - `validate_invariants()` verifies the `ways` / `ways_by_id` pair (called automatically in debug builds from `new`/`push_way`).
 
