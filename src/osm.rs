@@ -11,6 +11,10 @@ use quick_xml::events::attributes::Attribute;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+use crate::synthetic_ids::{
+    SYNTHETIC_NODE_ID_BASE, next_writer_node_id, writer_relation_id, writer_way_id,
+};
+
 /// A geographic point from the OSM dataset.
 #[derive(Debug, Clone, Copy)]
 pub struct OsmNode {
@@ -799,16 +803,6 @@ fn write_tags(xml: &mut String, tags: &HashMap<String, String>) {
     }
 }
 
-fn next_synthetic_node_id(next_id: &mut i64, occupied: &mut HashSet<i64>) -> i64 {
-    while occupied.contains(next_id) {
-        *next_id -= 1;
-    }
-    let id = *next_id;
-    occupied.insert(id);
-    *next_id -= 1;
-    id
-}
-
 /// Serialize normalized [`OsmData`] into simple OSM XML that this crate and
 /// `osm-world` can parse again.
 pub fn write_osm_xml_string(data: &OsmData) -> String {
@@ -832,9 +826,9 @@ pub fn write_osm_xml_string(data: &OsmData) -> String {
     }
 
     let mut occupied_node_ids: HashSet<i64> = data.nodes.keys().copied().collect();
-    let mut synthetic_id = -9_000_000_000_i64;
+    let mut synthetic_id = SYNTHETIC_NODE_ID_BASE;
     for poi in &data.poi_nodes {
-        let node_id = next_synthetic_node_id(&mut synthetic_id, &mut occupied_node_ids);
+        let node_id = next_writer_node_id(&mut synthetic_id, &mut occupied_node_ids);
         xml.push_str(&format!(
             "  <node id=\"{}\" lat=\"{}\" lon=\"{}\">\n",
             node_id, poi.lat, poi.lon
@@ -844,7 +838,7 @@ pub fn write_osm_xml_string(data: &OsmData) -> String {
     }
 
     for addr in &data.addr_nodes {
-        let node_id = next_synthetic_node_id(&mut synthetic_id, &mut occupied_node_ids);
+        let node_id = next_writer_node_id(&mut synthetic_id, &mut occupied_node_ids);
         xml.push_str(&format!(
             "  <node id=\"{}\" lat=\"{}\" lon=\"{}\">\n",
             node_id, addr.lat, addr.lon
@@ -854,7 +848,7 @@ pub fn write_osm_xml_string(data: &OsmData) -> String {
     }
 
     for tree in &data.tree_nodes {
-        let node_id = next_synthetic_node_id(&mut synthetic_id, &mut occupied_node_ids);
+        let node_id = next_writer_node_id(&mut synthetic_id, &mut occupied_node_ids);
         xml.push_str(&format!(
             "  <node id=\"{}\" lat=\"{}\" lon=\"{}\">\n    <tag k=\"natural\" v=\"tree\"/>\n  </node>\n",
             node_id, tree.lat, tree.lon
@@ -866,7 +860,7 @@ pub fn write_osm_xml_string(data: &OsmData) -> String {
             .ways_by_id
             .iter()
             .find_map(|(id, way_idx)| (*way_idx == idx).then_some(*id))
-            .unwrap_or_else(|| -8_000_000_000_i64 - idx as i64);
+            .unwrap_or_else(|| writer_way_id(idx));
         xml.push_str(&format!("  <way id=\"{}\">\n", way_id));
         for node_ref in &way.node_refs {
             xml.push_str(&format!("    <nd ref=\"{}\"/>\n", node_ref));
@@ -876,7 +870,7 @@ pub fn write_osm_xml_string(data: &OsmData) -> String {
     }
 
     for (idx, relation) in data.relations.iter().enumerate() {
-        let relation_id = -7_000_000_000_i64 - idx as i64;
+        let relation_id = writer_relation_id(idx);
         xml.push_str(&format!("  <relation id=\"{}\">\n", relation_id));
         for member in &relation.members {
             xml.push_str(&format!(
@@ -1218,7 +1212,7 @@ mod tests {
     #[test]
     fn write_osm_xml_string_allocates_synthetic_node_ids_without_collisions() {
         let data = OsmData::new(
-            HashMap::from([(-9_000_000_000, OsmNode { lat: 0.0, lon: 0.0 })]),
+            HashMap::from([(SYNTHETIC_NODE_ID_BASE, OsmNode { lat: 0.0, lon: 0.0 })]),
             Vec::new(),
             Vec::new(),
             None,

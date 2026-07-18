@@ -66,3 +66,4 @@ pub mod overture;
 pub mod source_options;
 pub mod sources;
 pub mod srtm;
+pub mod synthetic_ids;

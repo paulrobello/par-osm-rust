@@ -16,10 +16,10 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::osm::{FeatureSource, OsmData, OsmNode, OsmPoiNode, OsmWay};
+use crate::synthetic_ids::OvertureIdAllocator;
 
 /// Overture Maps theme selector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -135,19 +135,15 @@ impl OvertureParams {
     }
 }
 
-// ── Synthetic node-ID counter ─────────────────────────────────────────────
-
-/// Atomic counter for synthetic negative node IDs.
-///
-/// Overture geometry nodes do not carry OSM IDs.  We assign synthetic
-/// negative IDs starting at −1 000 000 000 to avoid any collision with
-/// real OSM IDs (which are always positive).
-static SYNTHETIC_ID_COUNTER: AtomicI64 = AtomicI64::new(-1_000_000_000);
-
-/// Return the next unique synthetic (negative) node ID.
-fn next_synthetic_id() -> i64 {
-    SYNTHETIC_ID_COUNTER.fetch_sub(1, Ordering::Relaxed)
-}
+// ── Synthetic node-ID allocation ──────────────────────────────────────────
+//
+// Overture geometry nodes and ways do not carry OSM IDs, so each parse
+// assigns synthetic IDs from a fresh [`OvertureIdAllocator`] owned by
+// `parse_overture_geojson`. The allocator starts at
+// `SYNTHETIC_OVERTURE_ID_BASE` and decrements per ID, making parses
+// deterministic (ARC-009 / QA-010) and keeping the Overture range disjoint
+// from the writer's node/way/relation ranges and from real OSM IDs.
+// See `crate::synthetic_ids` for the centralized contract.
 
 // ── CLI availability check ────────────────────────────────────────────────
 
@@ -358,10 +354,11 @@ fn update_bounds(
 /// Convert a GeoJSON coordinate array `[lon, lat]` or `[lon, lat, ele]` to an
 /// `(OsmNode, i64)` pair and update the bounding-box accumulator.
 ///
-/// Returns the synthetic node ID and the node, or `None` if the array is
-/// malformed.
+/// Returns the synthetic node ID (drawn from `id_alloc`) and the node, or
+/// `None` if the array is malformed.
 fn coord_to_node(
     coord: &Value,
+    id_alloc: &mut OvertureIdAllocator,
     min_lat: &mut f64,
     min_lon: &mut f64,
     max_lat: &mut f64,
@@ -371,15 +368,17 @@ fn coord_to_node(
     let lon = arr.first()?.as_f64()?;
     let lat = arr.get(1)?.as_f64()?;
     update_bounds(min_lat, min_lon, max_lat, max_lon, lat, lon);
-    Some((next_synthetic_id(), OsmNode { lat, lon }))
+    Some((id_alloc.next_id(), OsmNode { lat, lon }))
 }
 
 /// Convert a GeoJSON coordinate array (ring or line) into a list of node IDs
 /// and the corresponding node map entries.
 ///
-/// Each element of `coords` is expected to be a `[lon, lat]` array.
+/// Each element of `coords` is expected to be a `[lon, lat]` array. IDs are
+/// drawn from `id_alloc`.
 fn coords_to_nodes(
     coords: &[Value],
+    id_alloc: &mut OvertureIdAllocator,
     min_lat: &mut f64,
     min_lon: &mut f64,
     max_lat: &mut f64,
@@ -388,7 +387,8 @@ fn coords_to_nodes(
     let mut node_refs = Vec::with_capacity(coords.len());
     let mut nodes = HashMap::with_capacity(coords.len());
     for coord in coords {
-        if let Some((id, node)) = coord_to_node(coord, min_lat, min_lon, max_lat, max_lon) {
+        if let Some((id, node)) = coord_to_node(coord, id_alloc, min_lat, min_lon, max_lat, max_lon)
+        {
             node_refs.push(id);
             nodes.insert(id, node);
         }
@@ -577,6 +577,10 @@ pub fn parse_overture_geojson(geojson_str: &str, theme: OvertureTheme) -> Result
         .map(|a| a.as_slice())
         .unwrap_or(&[]);
 
+    // Fresh per-parse allocator: identical GeoJSON inputs produce identical
+    // synthetic ID sequences (ARC-009 / QA-010). See `crate::synthetic_ids`.
+    let mut id_alloc = OvertureIdAllocator::new();
+
     let mut nodes: HashMap<i64, OsmNode> = HashMap::new();
     let mut ways_with_ids: Vec<(i64, OsmWay)> = Vec::new();
     let mut poi_nodes: Vec<OsmPoiNode> = Vec::new();
@@ -604,6 +608,7 @@ pub fn parse_overture_geojson(geojson_str: &str, theme: OvertureTheme) -> Result
                 if let Some(coord) = coordinates
                     && let Some((id, node)) = coord_to_node(
                         coord,
+                        &mut id_alloc,
                         &mut min_lat,
                         &mut min_lon,
                         &mut max_lat,
@@ -637,13 +642,14 @@ pub fn parse_overture_geojson(geojson_str: &str, theme: OvertureTheme) -> Result
                 if let Some(coords) = coordinates.and_then(|c| c.as_array()) {
                     let (node_refs, new_nodes) = coords_to_nodes(
                         coords,
+                        &mut id_alloc,
                         &mut min_lat,
                         &mut min_lon,
                         &mut max_lat,
                         &mut max_lon,
                     );
                     if !node_refs.is_empty() {
-                        let way_id = next_synthetic_id();
+                        let way_id = id_alloc.next_id();
                         ways_with_ids.push((way_id, OsmWay { tags, node_refs }));
                         nodes.extend(new_nodes);
                     }
@@ -659,13 +665,14 @@ pub fn parse_overture_geojson(geojson_str: &str, theme: OvertureTheme) -> Result
                 {
                     let (node_refs, new_nodes) = coords_to_nodes(
                         outer_ring,
+                        &mut id_alloc,
                         &mut min_lat,
                         &mut min_lon,
                         &mut max_lat,
                         &mut max_lon,
                     );
                     if !node_refs.is_empty() {
-                        let way_id = next_synthetic_id();
+                        let way_id = id_alloc.next_id();
                         ways_with_ids.push((way_id, OsmWay { tags, node_refs }));
                         nodes.extend(new_nodes);
                     }
@@ -683,13 +690,14 @@ pub fn parse_overture_geojson(geojson_str: &str, theme: OvertureTheme) -> Result
                         {
                             let (node_refs, new_nodes) = coords_to_nodes(
                                 outer_ring,
+                                &mut id_alloc,
                                 &mut min_lat,
                                 &mut min_lon,
                                 &mut max_lat,
                                 &mut max_lon,
                             );
                             if !node_refs.is_empty() {
-                                let way_id = next_synthetic_id();
+                                let way_id = id_alloc.next_id();
                                 ways_with_ids.push((
                                     way_id,
                                     OsmWay {
@@ -1432,6 +1440,40 @@ exit 23
         assert!((min_lon - 0.0).abs() < 1e-9);
         assert!((max_lat - 1.0).abs() < 1e-9);
         assert!((max_lon - 1.0).abs() < 1e-9);
+    }
+
+    // ── Determinism tests (ARC-009 / QA-010) ────────────────────────────
+
+    #[test]
+    fn parse_overture_geojson_is_deterministic_across_calls() {
+        // Two parses of identical GeoJSON must produce identical synthetic
+        // IDs (the per-parse allocator resets on each call). The previous
+        // global AtomicI64 design made the second parse's IDs depend on the
+        // first.
+        let geojson = polygon_feature(serde_json::json!({}));
+        let first = parse_overture_geojson(&geojson, OvertureTheme::Building).unwrap();
+        let second = parse_overture_geojson(&geojson, OvertureTheme::Building).unwrap();
+
+        let first_way_id = first.way_id_at(0).expect("first parse has a way");
+        let second_way_id = second.way_id_at(0).expect("second parse has a way");
+        assert_eq!(
+            first_way_id, second_way_id,
+            "way IDs diverged across identical parses"
+        );
+        assert_eq!(first.nodes.len(), second.nodes.len());
+        assert_eq!(
+            first
+                .nodes
+                .keys()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>(),
+            second
+                .nodes
+                .keys()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>(),
+            "node IDs diverged across identical parses"
+        );
     }
 
     // ── Cache tests ──────────────────────────────────────────────────────
