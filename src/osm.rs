@@ -6,10 +6,12 @@
 //!
 //! * [`parse_pbf`] reads a `.osm.pbf` file via `osmpbf`'s memory-mapped
 //!   `ElementReader`.
-//! * [`parse_osm_xml_str`] / [`parse_osm_xml`] / [`parse_osm_file`] parse
-//!   OSM XML in a single `read_event` pass that handles nodes, ways, and
-//!   relations in whatever order they appear (Overpass does not guarantee
-//!   node-before-way ordering).
+//! * [`parse_osm_xml_str`] / [`parse_osm_xml`] / [`parse_osm_xml_file`] /
+//!   [`parse_osm_file`] parse OSM XML in a single-pass event loop that
+//!   handles nodes, ways, and relations in whatever order they appear
+//!   (Overpass does not guarantee node-before-way ordering).
+//!   [`parse_osm_xml_file`] streams from disk via a `BufReader` so peak
+//!   memory stays bounded on large `.osm` extracts (ARC-013).
 //! * [`write_osm_xml_string`] serializes an [`OsmData`] back into the simple
 //!   OSM XML dialect this crate and `osm-world` can re-parse.
 //!
@@ -25,6 +27,8 @@ use quick_xml::events::BytesStart;
 use quick_xml::events::Event;
 use quick_xml::events::attributes::Attribute;
 use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io::BufReader;
 use std::path::Path;
 
 use crate::synthetic_ids::{
@@ -902,6 +906,271 @@ pub fn parse_osm_xml_str(xml: &str) -> Result<OsmData> {
 
     log::info!(
         "Parsed {} nodes, {} ways, {} relations, {} POI nodes, {} address nodes, {} tree nodes (XML)",
+        nodes.len(),
+        ways.len(),
+        relations.len(),
+        poi_nodes.len(),
+        addr_nodes.len(),
+        tree_nodes.len(),
+    );
+
+    Ok(OsmData::new(
+        nodes, ways, relations, bounds, poi_nodes, addr_nodes, tree_nodes,
+    ))
+}
+
+/// Stream a `.osm` XML file from disk into [`OsmData`] without first
+/// reading the whole file into memory (ARC-013).
+///
+/// **Stream design.** The file is opened, wrapped in a `std::io::BufReader<File>`,
+/// and handed to `quick_xml::Reader::from_reader`, which pulls bytes
+/// incrementally. The event loop uses `quick_xml::Reader::read_event_into`
+/// with a reused scratch `Vec<u8>` — the buffer-reusing API that a
+/// streaming reader requires (unlike [`parse_osm_xml_str`], which borrows
+/// directly from its input `&str` via `read_event`).
+///
+/// **Parser semantics are identical to [`parse_osm_xml_str`].** The same
+/// single-pass structure runs against the streamed events: nodes, ways,
+/// relations, and `<bounds>` are collected in arrival order regardless of
+/// element ordering (Overpass does not guarantee node-before-way); the
+/// same attribute helpers (`parse_bounds_attrs`, `parse_node_attrs`,
+/// `parse_tag_attrs`, `parse_nd_ref`, `parse_member_attrs`) decode each
+/// element; the [`MAX_XML_DEPTH`] cap (SEC-004) bounds element nesting;
+/// and the resulting [`OsmWay`]s carry their OSM id (QA-021), fed into
+/// [`OsmData::new`]. For any valid file the output equals
+/// `parse_osm_xml_str(&std::fs::read_to_string(path)?)`.
+///
+/// **Memory profile.** Peak memory is bounded by:
+/// * the `BufReader` internal buffer (8 KiB by default),
+/// * the per-event scratch `Vec<u8>` (grows to the largest single XML
+///   event — typically a few hundred bytes for OSM elements),
+/// * the accumulated [`OsmData`] itself (inherent to the dataset).
+///
+/// The peak is **not** proportional to the input file size:
+/// `std::fs::read_to_string`'s full-file `String` (roughly file-size bytes
+/// on top of the parsed [`OsmData`]) is avoided. For a 200 MB `.osm`
+/// extract that is the difference between ~400 MB peak (in-memory string
+/// plus parsed data) and roughly the parsed data alone.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be opened or read, or if the XML
+/// is malformed (including the [`MAX_XML_DEPTH`] violation, SEC-004).
+///
+/// # Examples
+///
+/// ```no_run
+/// use par_osm_rust::osm::parse_osm_xml_file;
+///
+/// # fn main() -> anyhow::Result<()> {
+/// let data = parse_osm_xml_file("/path/to/extract.osm")?;
+/// println!("{} ways", data.iter_ways().count());
+/// # Ok(())
+/// # }
+/// ```
+pub fn parse_osm_xml_file<P: AsRef<Path>>(path: P) -> Result<OsmData> {
+    let path_ref = path.as_ref();
+    let file = File::open(path_ref).with_context(|| format!("opening {}", path_ref.display()))?;
+    let bufreader = BufReader::new(file);
+    let mut reader = Reader::from_reader(bufreader);
+    reader.config_mut().trim_text(true);
+
+    // Per-element state — mirrors parse_osm_xml_str exactly. The three
+    // `in_*` flags are mutually exclusive because OSM XML never nests
+    // `<node>`/`<way>`/`<relation>` inside each other; their `<tag>`/`<nd>`/
+    // `<member>` children appear between the Start and End events of the
+    // owning element.
+    let mut nodes: HashMap<i64, OsmNode> = HashMap::new();
+    let mut ways: Vec<OsmWay> = Vec::new();
+    let mut relations: Vec<OsmRelation> = Vec::new();
+    let mut poi_nodes: Vec<OsmPoiNode> = Vec::new();
+    let mut addr_nodes: Vec<OsmPoiNode> = Vec::new();
+    let mut tree_nodes: Vec<OsmNode> = Vec::new();
+    let mut min_lat = f64::MAX;
+    let mut min_lon = f64::MAX;
+    let mut max_lat = f64::MIN;
+    let mut max_lon = f64::MIN;
+    let mut explicit_bounds: Option<(f64, f64, f64, f64)> = None;
+
+    let mut in_node = false;
+    let mut cur_lat = 0.0f64;
+    let mut cur_lon = 0.0f64;
+    let mut cur_node_tags: HashMap<String, String> = HashMap::new();
+
+    let mut in_way = false;
+    let mut current_way_id: i64 = 0;
+    let mut current_tags: HashMap<String, String> = HashMap::new();
+    let mut current_node_refs: Vec<i64> = Vec::new();
+
+    let mut in_relation = false;
+    let mut current_members: Vec<RelationMember> = Vec::new();
+
+    let mut depth: usize = 0;
+
+    // Reused scratch buffer for read_event_into — bounded by the largest
+    // single XML event in the input, NOT by the file size.
+    let mut buf: Vec<u8> = Vec::new();
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e)) => {
+                depth += 1;
+                if depth > MAX_XML_DEPTH {
+                    return Err(anyhow::anyhow!(
+                        "XML element nesting depth {depth} exceeds limit {MAX_XML_DEPTH} at position {}",
+                        reader.buffer_position()
+                    ));
+                }
+                match e.name().as_ref() {
+                    b"bounds" => {
+                        if let Some(b) = parse_bounds_attrs(e) {
+                            explicit_bounds = Some(b);
+                        }
+                    }
+                    b"node" => {
+                        if let Some((id, lat, lon)) = parse_node_attrs(e) {
+                            min_lat = min_lat.min(lat);
+                            min_lon = min_lon.min(lon);
+                            max_lat = max_lat.max(lat);
+                            max_lon = max_lon.max(lon);
+                            nodes.insert(id, OsmNode { lat, lon });
+                            in_node = true;
+                            cur_lat = lat;
+                            cur_lon = lon;
+                            cur_node_tags.clear();
+                        }
+                    }
+                    b"way" => {
+                        in_way = true;
+                        current_way_id = e
+                            .attributes()
+                            .flatten()
+                            .find(|a| a.key.as_ref() == b"id")
+                            .and_then(|a| xml_attr_parse::<i64>(&a))
+                            .unwrap_or(0);
+                        current_tags.clear();
+                        current_node_refs.clear();
+                    }
+                    b"relation" => {
+                        in_relation = true;
+                        current_tags.clear();
+                        current_members.clear();
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::Empty(ref e)) => match e.name().as_ref() {
+                b"bounds" => {
+                    if let Some(b) = parse_bounds_attrs(e) {
+                        explicit_bounds = Some(b);
+                    }
+                }
+                b"node" => {
+                    if let Some((id, lat, lon)) = parse_node_attrs(e) {
+                        min_lat = min_lat.min(lat);
+                        min_lon = min_lon.min(lon);
+                        max_lat = max_lat.max(lat);
+                        max_lon = max_lon.max(lon);
+                        nodes.insert(id, OsmNode { lat, lon });
+                    }
+                }
+                b"tag" if in_node || in_way || in_relation => {
+                    if let Some((k, v)) = parse_tag_attrs(e) {
+                        if in_node {
+                            cur_node_tags.insert(k, v);
+                        } else {
+                            current_tags.insert(k, v);
+                        }
+                    }
+                }
+                b"nd" if in_way => {
+                    if let Some(r) = parse_nd_ref(e) {
+                        current_node_refs.push(r);
+                    }
+                }
+                b"member" if in_relation => {
+                    let (mtype, mref, mrole) = parse_member_attrs(e);
+                    if mtype == "way" && mref != 0 {
+                        current_members.push(RelationMember {
+                            way_id: mref,
+                            role: mrole,
+                        });
+                    }
+                }
+                _ => {}
+            },
+            Ok(Event::End(ref e)) => {
+                depth = depth.saturating_sub(1);
+                match e.name().as_ref() {
+                    b"node" if in_node => {
+                        in_node = false;
+                        if cur_node_tags.keys().any(|k| {
+                            matches!(
+                                k.as_str(),
+                                "amenity" | "shop" | "tourism" | "leisure" | "historic"
+                            )
+                        }) {
+                            poi_nodes.push(OsmPoiNode {
+                                lat: cur_lat,
+                                lon: cur_lon,
+                                tags: cur_node_tags.clone(),
+                                source: FeatureSource::Osm,
+                            });
+                        }
+                        if cur_node_tags.contains_key("addr:housenumber") {
+                            addr_nodes.push(OsmPoiNode {
+                                lat: cur_lat,
+                                lon: cur_lon,
+                                tags: cur_node_tags.clone(),
+                                source: FeatureSource::Osm,
+                            });
+                        }
+                        if cur_node_tags.get("natural").map(|s| s.as_str()) == Some("tree") {
+                            tree_nodes.push(OsmNode {
+                                lat: cur_lat,
+                                lon: cur_lon,
+                            });
+                        }
+                    }
+                    b"way" if in_way => {
+                        in_way = false;
+                        let way = OsmWay {
+                            id: current_way_id,
+                            tags: current_tags.clone(),
+                            node_refs: current_node_refs.clone(),
+                        };
+                        ways.push(way);
+                    }
+                    b"relation" if in_relation => {
+                        in_relation = false;
+                        let rel_type = current_tags.get("type").map(|s| s.as_str());
+                        if rel_type == Some("multipolygon") && !current_members.is_empty() {
+                            relations.push(OsmRelation {
+                                tags: current_tags.clone(),
+                                members: current_members.clone(),
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "XML parse error at position {}: {e}",
+                    reader.buffer_position()
+                ));
+            }
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    let bounds = explicit_bounds
+        .or_else(|| (min_lat < f64::MAX).then_some((min_lat, min_lon, max_lat, max_lon)));
+
+    log::info!(
+        "Parsed {} nodes, {} ways, {} relations, {} POI nodes, {} address nodes, {} tree nodes (streamed XML)",
         nodes.len(),
         ways.len(),
         relations.len(),
@@ -1903,5 +2172,139 @@ mod tests {
         assert_eq!(way_lines.len(), 2);
         assert!(way_lines[0].contains("id=\"100\""));
         assert!(way_lines[1].contains("id=\"200\""));
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // ARC-013: streaming parse_osm_xml_file must produce output identical
+    // to parse_osm_xml_str(&read_to_string(path)), and must surface a clear
+    // error on a missing input file. OsmData does not derive PartialEq, so
+    // equivalence is checked field-by-field (matching the round-trip test
+    // pattern above).
+    // ────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_osm_xml_file_equivalence_matches_parse_osm_xml_str() {
+        use std::io::Write;
+        let mut tmp = tempfile::Builder::new()
+            .suffix(".osm")
+            .tempfile()
+            .expect("tempfile creation");
+        tmp.write_all(COMPREHENSIVE_OSM.as_bytes())
+            .expect("write fixture");
+        let (_, path) = tmp.into_parts();
+
+        let streamed = parse_osm_xml_file(&path).expect("streaming parse");
+        let in_memory = parse_osm_xml_str(COMPREHENSIVE_OSM).expect("string parse");
+
+        streamed.validate_invariants().expect("streamed invariants");
+        in_memory
+            .validate_invariants()
+            .expect("in-memory invariants");
+
+        // bounds (Option tuple of f64).
+        assert_eq!(streamed.bounds, in_memory.bounds);
+
+        // nodes (HashMap<i64, OsmNode>) — OsmNode has no PartialEq, so
+        // compare lat/lon with a tight tolerance.
+        assert_eq!(streamed.nodes.len(), in_memory.nodes.len());
+        for (id, exp) in &in_memory.nodes {
+            let got = streamed.nodes.get(id).expect("node present on both sides");
+            assert!((got.lat - exp.lat).abs() < 1e-9, "node {id} lat");
+            assert!((got.lon - exp.lon).abs() < 1e-9, "node {id} lon");
+        }
+
+        // ways (Vec<OsmWay>) — id, tags, node_refs.
+        assert_eq!(streamed.ways.len(), in_memory.ways.len());
+        for (i, (a, b)) in streamed.ways.iter().zip(in_memory.ways.iter()).enumerate() {
+            assert_eq!(a.id, b.id, "way {i} id");
+            assert_eq!(a.node_refs, b.node_refs, "way {i} node_refs");
+            assert_eq!(a.tags, b.tags, "way {i} tags");
+        }
+
+        // relations (Vec<OsmRelation>) — tags + members (way_id, role).
+        assert_eq!(streamed.relations.len(), in_memory.relations.len());
+        for (i, (a, b)) in streamed
+            .relations
+            .iter()
+            .zip(in_memory.relations.iter())
+            .enumerate()
+        {
+            assert_eq!(a.tags, b.tags, "relation {i} tags");
+            assert_eq!(
+                a.members.len(),
+                b.members.len(),
+                "relation {i} member count"
+            );
+            for (j, (m, n)) in a.members.iter().zip(b.members.iter()).enumerate() {
+                assert_eq!(m.way_id, n.way_id, "relation {i} member {j} way_id");
+                assert_eq!(m.role, n.role, "relation {i} member {j} role");
+            }
+        }
+
+        // poi_nodes / addr_nodes (Vec<OsmPoiNode>) — lat/lon, tags, source.
+        assert_eq!(streamed.poi_nodes.len(), in_memory.poi_nodes.len());
+        for (i, (a, b)) in streamed
+            .poi_nodes
+            .iter()
+            .zip(in_memory.poi_nodes.iter())
+            .enumerate()
+        {
+            assert!((a.lat - b.lat).abs() < 1e-9, "poi {i} lat");
+            assert!((a.lon - b.lon).abs() < 1e-9, "poi {i} lon");
+            assert_eq!(a.tags, b.tags, "poi {i} tags");
+            assert_eq!(a.source, b.source, "poi {i} source");
+        }
+        assert_eq!(streamed.addr_nodes.len(), in_memory.addr_nodes.len());
+        for (i, (a, b)) in streamed
+            .addr_nodes
+            .iter()
+            .zip(in_memory.addr_nodes.iter())
+            .enumerate()
+        {
+            assert!((a.lat - b.lat).abs() < 1e-9, "addr {i} lat");
+            assert!((a.lon - b.lon).abs() < 1e-9, "addr {i} lon");
+            assert_eq!(a.tags, b.tags, "addr {i} tags");
+            assert_eq!(a.source, b.source, "addr {i} source");
+        }
+
+        // tree_nodes (Vec<OsmNode>) — lat/lon only.
+        assert_eq!(streamed.tree_nodes.len(), in_memory.tree_nodes.len());
+        for (i, (a, b)) in streamed
+            .tree_nodes
+            .iter()
+            .zip(in_memory.tree_nodes.iter())
+            .enumerate()
+        {
+            assert!((a.lat - b.lat).abs() < 1e-9, "tree {i} lat");
+            assert!((a.lon - b.lon).abs() < 1e-9, "tree {i} lon");
+        }
+    }
+
+    #[test]
+    fn parse_osm_xml_file_returns_clear_error_on_missing_file() {
+        // Pick a path under the temp dir that is guaranteed not to exist;
+        // remove_file ignores NotFound so any leftover from a prior run is
+        // cleared before the assertion.
+        let path = std::env::temp_dir().join("par-osm-rust-arc013-definitely-missing.osm");
+        let _ = std::fs::remove_file(&path);
+
+        let err = match parse_osm_xml_file(&path) {
+            Ok(_) => panic!("missing file must error, got Ok"),
+            Err(e) => e,
+        };
+
+        // The top-level context must mention the file-open failure and the
+        // path; the underlying OS NotFound is preserved in the error chain.
+        let msg = err.to_string();
+        assert!(
+            msg.contains("opening"),
+            "expected 'opening' in error message, got: {msg}"
+        );
+        let chain: Vec<String> = err.chain().map(|c| c.to_string()).collect();
+        let full = chain.join(" -> ");
+        assert!(
+            full.contains(path.file_name().unwrap().to_string_lossy().as_ref()),
+            "expected path in error chain, got: {full}"
+        );
     }
 }
