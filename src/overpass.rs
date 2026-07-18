@@ -138,12 +138,57 @@ pub fn build_overpass_query(bbox: (f64, f64, f64, f64), filter: &FeatureFilter) 
     ))
 }
 
+/// Maximum number of bytes from an Overpass error response body that will be
+/// surfaced into the `anyhow` error message. Mirrors `STDERR_SNIPPET_LIMIT`
+/// in `src/overture.rs` — keeps error messages bounded if a mirror returns a
+/// large error body.
+const ERROR_BODY_LIMIT: usize = 4096;
+
+/// Truncate an Overpass error response body to [`ERROR_BODY_LIMIT`] bytes,
+/// splitting across head and tail at char boundaries. Mirrors the
+/// `stderr_suffix` pattern in `src/overture.rs`.
+fn truncate_error_body(body: &[u8]) -> String {
+    let body = String::from_utf8_lossy(body);
+    let body = body.trim();
+    if body.is_empty() {
+        String::new()
+    } else if body.len() <= ERROR_BODY_LIMIT {
+        body.to_string()
+    } else {
+        let head_len = ERROR_BODY_LIMIT / 2;
+        let tail_len = ERROR_BODY_LIMIT - head_len;
+        let head = str_prefix_at_boundary(body, head_len);
+        let tail = str_suffix_at_boundary(body, tail_len);
+        let omitted = body.len().saturating_sub(head.len() + tail.len());
+        format!("{head}\n...[body truncated, {omitted} bytes omitted]...\n{tail}")
+    }
+}
+
+fn str_prefix_at_boundary(s: &str, max_bytes: usize) -> &str {
+    let mut end = max_bytes.min(s.len());
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+fn str_suffix_at_boundary(s: &str, max_bytes: usize) -> &str {
+    let mut start = s.len().saturating_sub(max_bytes);
+    while !s.is_char_boundary(start) {
+        start += 1;
+    }
+    &s[start..]
+}
+
 /// Fetch raw OSM XML from the Overpass API for the given bounding box.
 ///
 /// - Validates `overpass_url` against an approved host allowlist (SSRF guard).
 /// - Validates `bbox` before making any network request.
 /// - Returns a user-readable error for HTTP 429 (server busy).
 /// - Uses a blocking `reqwest` client (call from `spawn_blocking`).
+/// - Follows no redirects: any 3xx is treated as an error so a compromised
+///   allowlisted mirror cannot redirect the POST to an internal host (the
+///   allowlist is only enforced against the initial URL).
 pub fn fetch_osm_xml(
     bbox: (f64, f64, f64, f64),
     filter: &FeatureFilter,
@@ -153,6 +198,7 @@ pub fn fetch_osm_xml(
     let query = build_overpass_query(bbox, filter)?;
 
     let client = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(OVERPASS_TIMEOUT_SECS))
         .build()?;
 
@@ -164,7 +210,7 @@ pub fn fetch_osm_xml(
     }
     if !res.status().is_success() {
         let status = res.status();
-        let body = res.text().unwrap_or_default();
+        let body = truncate_error_body(&res.bytes().unwrap_or_default());
         bail!("Overpass API error ({status}): {body}");
     }
 
