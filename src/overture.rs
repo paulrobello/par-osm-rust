@@ -595,8 +595,13 @@ fn coords_to_nodes(
 ///
 /// Behavior preserved exactly from the prior inlined branches:
 /// - If `coords` produces zero valid node refs, nothing is pushed.
-/// - Otherwise a synthetic way ID is allocated, the way is appended with
-///   `tags` (moved), and the new nodes are merged into `nodes`.
+/// - Otherwise a synthetic way ID is allocated from `id_alloc` and stored
+///   directly on the [`OsmWay`] (QA-021), the way is appended with `tags`
+///   (moved), and the new nodes are merged into `nodes`.
+///
+/// The synthetic id is drawn from the per-parse [`OvertureIdAllocator`] so
+/// identical GeoJSON inputs produce identical id sequences across calls
+/// (ARC-009 / QA-010 determinism).
 ///
 /// Argument count exceeds clippy's default threshold because the four
 /// bounding-box accumulators are passed individually, mirroring the existing
@@ -608,7 +613,7 @@ fn push_way_from_coords(
     coords: &[Value],
     id_alloc: &mut OvertureIdAllocator,
     nodes: &mut HashMap<i64, OsmNode>,
-    ways_with_ids: &mut Vec<(i64, OsmWay)>,
+    ways: &mut Vec<OsmWay>,
     tags: HashMap<String, String>,
     min_lat: &mut f64,
     min_lon: &mut f64,
@@ -621,7 +626,11 @@ fn push_way_from_coords(
         return;
     }
     let way_id = id_alloc.next_id();
-    ways_with_ids.push((way_id, OsmWay { tags, node_refs }));
+    ways.push(OsmWay {
+        id: way_id,
+        tags,
+        node_refs,
+    });
     nodes.extend(new_nodes);
 }
 
@@ -811,7 +820,7 @@ pub fn parse_overture_geojson(geojson_str: &str, theme: OvertureTheme) -> Result
     let mut id_alloc = OvertureIdAllocator::new();
 
     let mut nodes: HashMap<i64, OsmNode> = HashMap::new();
-    let mut ways_with_ids: Vec<(i64, OsmWay)> = Vec::new();
+    let mut ways: Vec<OsmWay> = Vec::new();
     let mut poi_nodes: Vec<OsmPoiNode> = Vec::new();
     let mut addr_nodes: Vec<OsmPoiNode> = Vec::new();
     let mut tree_nodes: Vec<OsmNode> = Vec::new();
@@ -873,7 +882,7 @@ pub fn parse_overture_geojson(geojson_str: &str, theme: OvertureTheme) -> Result
                         coords,
                         &mut id_alloc,
                         &mut nodes,
-                        &mut ways_with_ids,
+                        &mut ways,
                         tags,
                         &mut min_lat,
                         &mut min_lon,
@@ -894,7 +903,7 @@ pub fn parse_overture_geojson(geojson_str: &str, theme: OvertureTheme) -> Result
                         outer_ring,
                         &mut id_alloc,
                         &mut nodes,
-                        &mut ways_with_ids,
+                        &mut ways,
                         tags,
                         &mut min_lat,
                         &mut min_lon,
@@ -920,7 +929,7 @@ pub fn parse_overture_geojson(geojson_str: &str, theme: OvertureTheme) -> Result
                                 outer_ring,
                                 &mut id_alloc,
                                 &mut nodes,
-                                &mut ways_with_ids,
+                                &mut ways,
                                 tags.clone(),
                                 &mut min_lat,
                                 &mut min_lon,
@@ -946,7 +955,7 @@ pub fn parse_overture_geojson(geojson_str: &str, theme: OvertureTheme) -> Result
 
     Ok(OsmData::new(
         nodes,
-        ways_with_ids,
+        ways,
         Vec::new(),
         bounds,
         poi_nodes,

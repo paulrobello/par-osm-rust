@@ -59,8 +59,14 @@ pub struct OsmPoiNode {
 }
 
 /// An OSM way: an ordered sequence of node references with tags.
+///
+/// `id` is the way's own OSM identifier; it is the single source of truth
+/// consumed by [`OsmData::new`], the XML writer, and `ways_by_id`. Keeping
+/// the id on the struct (QA-021) obsoletes the prior `(id, way)` pair
+/// plumbing and the writer's reverse way-id lookup (ARC-003 / QA-001).
 #[derive(Debug, Clone)]
 pub struct OsmWay {
+    pub id: i64,
     pub tags: HashMap<String, String>,
     pub node_refs: Vec<i64>,
 }
@@ -116,12 +122,13 @@ pub struct OsmData {
 }
 
 impl OsmData {
-    /// Construct an [`OsmData`] from already-assembled collections, pairing
-    /// each way with its OSM id.
+    /// Construct an [`OsmData`] from already-assembled collections, seeding
+    /// `ways_by_id` from each [`OsmWay::id`].
     ///
-    /// `ways_with_ids` is a `Vec<(id, way)>`; this constructor seeds
-    /// `ways_by_id` from those pairs, which is the single place the
-    /// `ways`/`ways_by_id` invariant is established.
+    /// This is the single place the `ways` / `ways_by_id` invariant is
+    /// established: the constructor iterates `ways` in order and records
+    /// `ways_by_id[way.id] = index`. Callers must populate [`OsmWay::id`]
+    /// before passing ways in (QA-021).
     ///
     /// # Examples
     ///
@@ -142,19 +149,18 @@ impl OsmData {
     /// ```
     pub fn new(
         nodes: HashMap<i64, OsmNode>,
-        ways_with_ids: Vec<(i64, OsmWay)>,
+        ways: Vec<OsmWay>,
         relations: Vec<OsmRelation>,
         bounds: Option<(f64, f64, f64, f64)>,
         poi_nodes: Vec<OsmPoiNode>,
         addr_nodes: Vec<OsmPoiNode>,
         tree_nodes: Vec<OsmNode>,
     ) -> Self {
-        let ways_by_id = ways_with_ids
+        let ways_by_id = ways
             .iter()
             .enumerate()
-            .map(|(idx, (id, _))| (*id, idx))
+            .map(|(idx, way)| (way.id, idx))
             .collect();
-        let ways = ways_with_ids.into_iter().map(|(_, way)| way).collect();
         let data = Self {
             nodes,
             ways,
@@ -172,13 +178,14 @@ impl OsmData {
         data
     }
 
-    /// Append a way and its OSM id, updating `ways_by_id` atomically.
+    /// Append a way, updating `ways_by_id` atomically from [`OsmWay::id`].
     ///
     /// This is the single sanctioned mutation path for incrementally adding
     /// ways to an existing [`OsmData`]. Callers that already have a full
-    /// `(id, way)` sequence should prefer [`OsmData::new`].
-    pub fn push_way(&mut self, id: i64, way: OsmWay) {
+    /// sequence should prefer [`OsmData::new`].
+    pub fn push_way(&mut self, way: OsmWay) {
         let idx = self.ways.len();
+        let id = way.id;
         self.ways.push(way);
         self.ways_by_id.insert(id, idx);
         debug_assert!(
@@ -192,17 +199,16 @@ impl OsmData {
         self.ways.iter()
     }
 
-    /// Return the OSM id of the way at `index`, or `None` if the index is out
-    /// of range or no id maps to it (the latter cannot happen when the
-    /// invariant holds).
+    /// Return the OSM id of the way at `index`, or `None` if the index is
+    /// out of range. Reads [`OsmWay::id`] directly (QA-021).
     pub fn way_id_at(&self, index: usize) -> Option<i64> {
-        self.ways_by_id
-            .iter()
-            .find_map(|(id, &idx)| (idx == index).then_some(*id))
+        self.ways.get(index).map(|way| way.id)
     }
 
     /// Verify the `ways` / `ways_by_id` invariant: equal lengths, every
-    /// stored index is in range, and no two ids share an index.
+    /// stored index is in range, no two ids share an index, and each
+    /// `ways_by_id[ways[idx].id] == idx` (the per-way consistency check
+    /// added in QA-021, since `ways[].id` is now the source of truth).
     ///
     /// Returns `Err(message)` on the first violation. Called automatically
     /// in debug builds from [`OsmData::new`] and [`OsmData::push_way`];
@@ -226,6 +232,23 @@ impl OsmData {
             }
             if !seen_indices.insert(idx) {
                 return Err(format!("duplicate ways_by_id index {idx}"));
+            }
+        }
+        for (idx, way) in self.ways.iter().enumerate() {
+            match self.ways_by_id.get(&way.id) {
+                Some(&stored_idx) if stored_idx == idx => {}
+                Some(&stored_idx) => {
+                    return Err(format!(
+                        "ways[{idx}].id {} maps to ways_by_id index {stored_idx}, expected {idx}",
+                        way.id
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "ways[{idx}].id {} is missing from ways_by_id",
+                        way.id
+                    ));
+                }
             }
         }
         Ok(())
@@ -289,13 +312,12 @@ impl OsmData {
             lat >= min_lat && lat <= max_lat && lon >= min_lon && lon <= max_lon
         };
 
-        // Filter ways: keep if any node is inside the bbox.
-        // The `ways` / `ways_by_id` invariant guarantees every way has an
-        // entry in `ways_by_id`, so iterating the index covers every way.
+        // Filter ways: keep if any node is inside the bbox. `ways[].id` is
+        // the source of truth (QA-021), so iterate `ways` directly and clone
+        // the survivors; `ways_by_id` is rebuilt from each kept way's `id`.
         let mut keep_node_ids: std::collections::HashSet<i64> = std::collections::HashSet::new();
-        let mut kept_ways_with_ids: Vec<(i64, OsmWay)> = Vec::new();
-        for (way_id, &old_idx) in &self.ways_by_id {
-            let way = &self.ways[old_idx];
+        let mut kept_ways: Vec<OsmWay> = Vec::new();
+        for way in &self.ways {
             let touches_bbox = way
                 .node_refs
                 .iter()
@@ -304,17 +326,17 @@ impl OsmData {
                 for id in &way.node_refs {
                     keep_node_ids.insert(*id);
                 }
-                kept_ways_with_ids.push((*way_id, way.clone()));
+                kept_ways.push(way.clone());
             }
         }
 
-        // Rebuild the ways / ways_by_id pair atomically from the kept pairs.
-        self.ways_by_id = kept_ways_with_ids
+        // Rebuild the ways / ways_by_id pair atomically from the kept ways.
+        self.ways_by_id = kept_ways
             .iter()
             .enumerate()
-            .map(|(idx, (id, _))| (*id, idx))
+            .map(|(idx, way)| (way.id, idx))
             .collect();
-        self.ways = kept_ways_with_ids.into_iter().map(|(_, way)| way).collect();
+        self.ways = kept_ways;
 
         // Prune nodes to only those referenced by kept ways
         self.nodes.retain(|id, _| keep_node_ids.contains(id));
@@ -453,7 +475,7 @@ pub fn parse_pbf(path: &Path) -> Result<OsmData> {
         ElementReader::from_path(path).with_context(|| format!("opening {}", path.display()))?;
 
     let mut nodes: HashMap<i64, OsmNode> = HashMap::new();
-    let mut ways_with_ids: Vec<(i64, OsmWay)> = Vec::new();
+    let mut ways: Vec<OsmWay> = Vec::new();
     let mut relations: Vec<OsmRelation> = Vec::new();
     let mut poi_nodes: Vec<OsmPoiNode> = Vec::new();
     let mut addr_nodes: Vec<OsmPoiNode> = Vec::new();
@@ -512,10 +534,11 @@ pub fn parse_pbf(path: &Path) -> Result<OsmData> {
                     .collect();
                 let node_refs: Vec<i64> = w.refs().collect();
                 let way = OsmWay {
+                    id: w.id(),
                     tags: tags.clone(),
                     node_refs: node_refs.clone(),
                 };
-                ways_with_ids.push((w.id(), way));
+                ways.push(way);
             }
             Element::Relation(r) => {
                 let rel_type = r.tags().find(|(k, _)| *k == "type").map(|(_, v)| v);
@@ -554,7 +577,7 @@ pub fn parse_pbf(path: &Path) -> Result<OsmData> {
     log::info!(
         "Parsed {} nodes, {} ways, {} relations, {} POI nodes, {} address nodes, {} tree nodes",
         nodes.len(),
-        ways_with_ids.len(),
+        ways.len(),
         relations.len(),
         poi_nodes.len(),
         addr_nodes.len(),
@@ -562,13 +585,7 @@ pub fn parse_pbf(path: &Path) -> Result<OsmData> {
     );
 
     Ok(OsmData::new(
-        nodes,
-        ways_with_ids,
-        relations,
-        bounds,
-        poi_nodes,
-        addr_nodes,
-        tree_nodes,
+        nodes, ways, relations, bounds, poi_nodes, addr_nodes, tree_nodes,
     ))
 }
 
@@ -693,7 +710,7 @@ fn parse_member_attrs(e: &BytesStart<'_>) -> (String, i64, String) {
 /// ```
 pub fn parse_osm_xml_str(xml: &str) -> Result<OsmData> {
     let mut nodes: HashMap<i64, OsmNode> = HashMap::new();
-    let mut ways_with_ids: Vec<(i64, OsmWay)> = Vec::new();
+    let mut ways: Vec<OsmWay> = Vec::new();
     let mut relations: Vec<OsmRelation> = Vec::new();
     let mut poi_nodes: Vec<OsmPoiNode> = Vec::new();
     let mut addr_nodes: Vec<OsmPoiNode> = Vec::new();
@@ -850,10 +867,11 @@ pub fn parse_osm_xml_str(xml: &str) -> Result<OsmData> {
                     b"way" if in_way => {
                         in_way = false;
                         let way = OsmWay {
+                            id: current_way_id,
                             tags: current_tags.clone(),
                             node_refs: current_node_refs.clone(),
                         };
-                        ways_with_ids.push((current_way_id, way));
+                        ways.push(way);
                     }
                     b"relation" if in_relation => {
                         in_relation = false;
@@ -885,7 +903,7 @@ pub fn parse_osm_xml_str(xml: &str) -> Result<OsmData> {
     log::info!(
         "Parsed {} nodes, {} ways, {} relations, {} POI nodes, {} address nodes, {} tree nodes (XML)",
         nodes.len(),
-        ways_with_ids.len(),
+        ways.len(),
         relations.len(),
         poi_nodes.len(),
         addr_nodes.len(),
@@ -893,13 +911,7 @@ pub fn parse_osm_xml_str(xml: &str) -> Result<OsmData> {
     );
 
     Ok(OsmData::new(
-        nodes,
-        ways_with_ids,
-        relations,
-        bounds,
-        poi_nodes,
-        addr_nodes,
-        tree_nodes,
+        nodes, ways, relations, bounds, poi_nodes, addr_nodes, tree_nodes,
     ))
 }
 
@@ -1020,22 +1032,18 @@ pub fn write_osm_xml_string(data: &OsmData) -> String {
         ));
     }
 
-    // Build an inverse map (way index -> way id) ONCE so each way's id is an
-    // O(1) lookup instead of a per-way linear scan of `ways_by_id` (ARC-003).
-    // The invariant guarantees every way index appears here; the
-    // `writer_way_id(idx)` fallback preserves the original safety net for an
-    // externally-constructed `OsmData` that has drifted.
-    let way_id_by_index: HashMap<usize, i64> = data
-        .ways_by_id
-        .iter()
-        .map(|(id, &idx)| (idx, *id))
-        .collect();
-
+    // QA-021 / ARC-003 / QA-001: each `OsmWay` carries its own id, so the
+    // writer reads `way.id` directly — no per-way scan of `ways_by_id` and no
+    // up-front inverse map. The `writer_way_id(idx)` synthetic fallback
+    // remains as a safety net for an externally-constructed `OsmData` whose
+    // `ways[].id` was left at the default 0; `validate_invariants` is the
+    // real guard against drift between `ways[].id` and `ways_by_id`.
     for (idx, way) in data.ways.iter().enumerate() {
-        let way_id = way_id_by_index
-            .get(&idx)
-            .copied()
-            .unwrap_or_else(|| writer_way_id(idx));
+        let way_id = if way.id != 0 {
+            way.id
+        } else {
+            writer_way_id(idx)
+        };
         xml.push_str(&format!("  <way id=\"{}\">\n", way_id));
         for node_ref in &way.node_refs {
             // ARC-016: emit `<nd ref>` only for nodes that actually exist in
@@ -1103,6 +1111,7 @@ mod tests {
     fn parse_xml_ways() {
         let data = parse_osm_xml_str(MINIMAL_OSM).unwrap();
         assert_eq!(data.ways.len(), 1);
+        assert_eq!(data.ways[0].id, 10);
         assert_eq!(data.ways[0].tags["highway"], "residential");
         assert_eq!(data.ways[0].tags["name"], "Test Street");
         assert_eq!(data.ways[0].node_refs, vec![1, 2, 3]);
@@ -1342,20 +1351,16 @@ mod tests {
                 (2, OsmNode { lat: 1.0, lon: 1.0 }),
             ]),
             vec![
-                (
-                    100,
-                    OsmWay {
-                        tags: HashMap::from([("landuse".to_string(), "park".to_string())]),
-                        node_refs: vec![1, 2],
-                    },
-                ),
-                (
-                    101,
-                    OsmWay {
-                        tags: HashMap::from([("natural".to_string(), "water".to_string())]),
-                        node_refs: vec![2, 1],
-                    },
-                ),
+                OsmWay {
+                    id: 100,
+                    tags: HashMap::from([("landuse".to_string(), "park".to_string())]),
+                    node_refs: vec![1, 2],
+                },
+                OsmWay {
+                    id: 101,
+                    tags: HashMap::from([("natural".to_string(), "water".to_string())]),
+                    node_refs: vec![2, 1],
+                },
             ],
             vec![OsmRelation {
                 tags: HashMap::from([
@@ -1430,27 +1435,23 @@ mod tests {
     }
 
     #[test]
-    fn new_seeds_ways_by_id_from_way_pairs() {
+    fn new_seeds_ways_by_id_from_way_ids() {
         let data = OsmData::new(
             HashMap::from([
                 (1, OsmNode { lat: 0.0, lon: 0.0 }),
                 (2, OsmNode { lat: 1.0, lon: 1.0 }),
             ]),
             vec![
-                (
-                    100,
-                    OsmWay {
-                        tags: HashMap::new(),
-                        node_refs: vec![1, 2],
-                    },
-                ),
-                (
-                    101,
-                    OsmWay {
-                        tags: HashMap::new(),
-                        node_refs: vec![2, 1],
-                    },
-                ),
+                OsmWay {
+                    id: 100,
+                    tags: HashMap::new(),
+                    node_refs: vec![1, 2],
+                },
+                OsmWay {
+                    id: 101,
+                    tags: HashMap::new(),
+                    node_refs: vec![2, 1],
+                },
             ],
             Vec::new(),
             None,
@@ -1482,20 +1483,16 @@ mod tests {
             Vec::new(),
         );
 
-        data.push_way(
-            7,
-            OsmWay {
-                tags: HashMap::new(),
-                node_refs: vec![],
-            },
-        );
-        data.push_way(
-            9,
-            OsmWay {
-                tags: HashMap::new(),
-                node_refs: vec![],
-            },
-        );
+        data.push_way(OsmWay {
+            id: 7,
+            tags: HashMap::new(),
+            node_refs: vec![],
+        });
+        data.push_way(OsmWay {
+            id: 9,
+            tags: HashMap::new(),
+            node_refs: vec![],
+        });
 
         data.validate_invariants().unwrap();
         assert_eq!(data.ways.len(), 2);
@@ -1511,13 +1508,11 @@ mod tests {
         // invariant to confirm validate_invariants surfaces the drift.
         let mut data = OsmData::new(
             HashMap::new(),
-            vec![(
-                1,
-                OsmWay {
-                    tags: HashMap::new(),
-                    node_refs: vec![],
-                },
-            )],
+            vec![OsmWay {
+                id: 1,
+                tags: HashMap::new(),
+                node_refs: vec![],
+            }],
             Vec::new(),
             None,
             Vec::new(),
@@ -1529,11 +1524,44 @@ mod tests {
         // Push a way into `ways` without updating `ways_by_id` — simulates the
         // exact drift ARC-008 was filed against.
         data.ways.push(OsmWay {
+            id: 2,
             tags: HashMap::new(),
             node_refs: vec![],
         });
         let err = data.validate_invariants().expect_err("must detect drift");
         assert!(err.contains("ways_by_id length"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn validate_invariants_detects_a_drift_between_ways_id_and_ways_by_id() {
+        // QA-021: with `ways[].id` now the source of truth, validate_invariants
+        // must also catch a `ways_by_id` that disagrees with `ways[].id` even
+        // when the lengths and per-index uniqueness still line up.
+        let mut data = OsmData::new(
+            HashMap::new(),
+            vec![OsmWay {
+                id: 1,
+                tags: HashMap::new(),
+                node_refs: vec![],
+            }],
+            Vec::new(),
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        assert!(data.validate_invariants().is_ok());
+
+        // Rewire ways_by_id to point at a different id for index 0.
+        data.ways_by_id.clear();
+        data.ways_by_id.insert(999, 0);
+        let err = data
+            .validate_invariants()
+            .expect_err("must detect id drift");
+        assert!(
+            err.contains("ways[0].id") && err.contains("missing from ways_by_id"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -1607,6 +1635,8 @@ mod tests {
         assert_eq!(data.ways.len(), 2);
         assert_eq!(data.way_id_at(0), Some(200));
         assert_eq!(data.way_id_at(1), Some(201));
+        assert_eq!(data.ways[0].id, 200);
+        assert_eq!(data.ways[1].id, 201);
         assert_eq!(data.ways[0].node_refs, vec![100, 101]);
         assert_eq!(data.ways[0].tags["highway"], "residential");
         assert_eq!(data.ways[0].tags["name"], "First & Main");
@@ -1733,16 +1763,14 @@ mod tests {
                     },
                 ),
             ]),
-            vec![(
-                10,
-                OsmWay {
-                    tags: HashMap::from([
-                        ("highway".to_string(), "residential".to_string()),
-                        ("name".to_string(), "Test Street".to_string()),
-                    ]),
-                    node_refs: vec![1, 2, 3],
-                },
-            )],
+            vec![OsmWay {
+                id: 10,
+                tags: HashMap::from([
+                    ("highway".to_string(), "residential".to_string()),
+                    ("name".to_string(), "Test Street".to_string()),
+                ]),
+                node_refs: vec![1, 2, 3],
+            }],
             vec![OsmRelation {
                 tags: HashMap::from([
                     ("type".to_string(), "multipolygon".to_string()),
@@ -1801,14 +1829,12 @@ mod tests {
                 (1, OsmNode { lat: 0.0, lon: 0.0 }),
                 (2, OsmNode { lat: 1.0, lon: 1.0 }),
             ]),
-            vec![(
-                10,
-                OsmWay {
-                    tags: HashMap::new(),
-                    // Node 999 is dangling — not present in `nodes`.
-                    node_refs: vec![1, 2, 999],
-                },
-            )],
+            vec![OsmWay {
+                id: 10,
+                tags: HashMap::new(),
+                // Node 999 is dangling — not present in `nodes`.
+                node_refs: vec![1, 2, 999],
+            }],
             Vec::new(),
             None,
             Vec::new(),
@@ -1836,10 +1862,10 @@ mod tests {
 
     #[test]
     fn write_osm_xml_string_way_id_lookup_is_o1_correct() {
-        // ARC-003 / QA-001: the writer's inverse-map lookup must produce the
-        // exact same id-per-way-index as the prior linear scan, including
-        // when ways_by_id carries multiple ways (so a per-way O(n) scan
-        // would have been exercised).
+        // ARC-003 / QA-001 / QA-021: the writer reads `way.id` directly, so
+        // each way block must carry the id stored on the struct at that index.
+        // Two ways are exercised to confirm the writer is not silently
+        // reusing a single id or falling back to a synthetic.
         let data = OsmData::new(
             HashMap::from([
                 (1, OsmNode { lat: 0.0, lon: 0.0 }),
@@ -1848,20 +1874,16 @@ mod tests {
                 (4, OsmNode { lat: 3.0, lon: 3.0 }),
             ]),
             vec![
-                (
-                    100,
-                    OsmWay {
-                        tags: HashMap::new(),
-                        node_refs: vec![1, 2],
-                    },
-                ),
-                (
-                    200,
-                    OsmWay {
-                        tags: HashMap::new(),
-                        node_refs: vec![3, 4],
-                    },
-                ),
+                OsmWay {
+                    id: 100,
+                    tags: HashMap::new(),
+                    node_refs: vec![1, 2],
+                },
+                OsmWay {
+                    id: 200,
+                    tags: HashMap::new(),
+                    node_refs: vec![3, 4],
+                },
             ],
             Vec::new(),
             None,
@@ -1872,8 +1894,8 @@ mod tests {
 
         let xml = write_osm_xml_string(&data);
 
-        // Each way block carries the id corresponding to its index — the
-        // inverse map's correctness contract.
+        // Each way block carries the id stored on the way struct at that
+        // index — the QA-021 writer contract.
         let way_lines: Vec<&str> = xml
             .lines()
             .filter(|line| line.trim_start().starts_with("<way id=\""))
