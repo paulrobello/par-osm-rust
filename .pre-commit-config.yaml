@@ -1,0 +1,50 @@
+# Pre-commit hooks for par-osm-rust
+# Install: pre-commit install
+# Run manually: pre-commit run --all-files
+#
+# Secret scanning is the last line of defense before a credential reaches the
+# remote, so gitleaks + detect-private-key are required (guides/git-ci.md).
+# Language checks delegate to the Makefile so tool invocations have one source
+# of truth.
+
+repos:
+  # --- Secret scanning -----------------------------------------------------
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+
+  # --- Standard hygiene + private-key detection ---------------------------
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: detect-private-key
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+
+  # --- Language checks wired to the Makefile ------------------------------
+  - repo: local
+    hooks:
+      - id: make-fmt
+        name: make fmt (cargo fmt)
+        description: Format Rust code via `make fmt`
+        entry: make fmt
+        language: system
+        files: '^.*\.rs$'
+        pass_filenames: false
+
+      - id: make-lint
+        name: make lint (cargo clippy)
+        description: Lint Rust code via `make lint` (clippy, deny warnings)
+        entry: make lint
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: make-typecheck
+        name: make typecheck (cargo check)
+        description: Type-check Rust code via `make typecheck`
+        entry: make typecheck
+        language: system
+        types: [rust]
+        pass_filenames: false

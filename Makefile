@@ -3,7 +3,7 @@
 # Standard target set (build, test, lint, fmt, typecheck, checkall, clean).
 # Commands mirror what CI runs in .github/workflows/ci.yml.
 
-.PHONY: all build build-release test lint fmt fmt-check typecheck check checkall clean
+.PHONY: all build build-release test lint fmt fmt-check typecheck check checkall bench pre-commit clean
 
 # Default target
 all: build
@@ -36,6 +36,15 @@ check: fmt-check lint
 
 # Full gate: formatting, lint (deny warnings), type-check, and tests.
 checkall: fmt-check lint typecheck test
+
+# Run `criterion` benchmarks (perf-critical parse/dedupe/write paths).
+bench:
+	cargo bench
+
+# --- Tooling ----------------------------------------------------------------
+# Run every pre-commit hook (secret scanning + hygiene + language checks).
+pre-commit:
+	pre-commit run --all-files
 
 # --- Cleanup ---------------------------------------------------------------
 clean:

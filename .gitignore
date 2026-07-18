@@ -1,5 +1,20 @@
+# Rust build artifacts
 /target/
+
+# Library crate: don't commit Cargo.lock — downstream resolves the lockfile
 Cargo.lock
+
+# macOS
 .DS_Store
 
+# Worktrees
 .worktrees/
+
+# Secrets / credentials — defense-in-depth (also covered by global gitignore)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets.*
+.claude/settings.local.json
