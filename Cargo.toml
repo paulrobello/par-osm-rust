@@ -33,3 +33,23 @@ sha2 = "0.11"
 tempfile = "3.27.0"
 url = "2"
 urlencoding = "2.1"
+
+[dev-dependencies]
+# ARC-018: criterion benches for perf-critical parse/dedupe/write paths.
+# Default features are sufficient; criterion does not need the crate's
+# `blocking` feature (it is a dev-dep test/bench harness).
+criterion = "0.5"
+
+# ARC-018: criterion requires `harness = false` on each bench target so it
+# can install its own `main`. One entry per file under benches/.
+[[bench]]
+name = "parse_osm_xml"
+harness = false
+
+[[bench]]
+name = "write_osm_xml"
+harness = false
+
+[[bench]]
+name = "merge_source_data"
+harness = false
