@@ -29,7 +29,7 @@ System design and module organization for `par-osm-rust` — a shared Rust crate
 - Make source orchestration explicit: OSM is the baseline source; Overture is opt-in and policy-driven.
 - Preserve safe defaults for network access, cache migration, and fallback behavior.
 
-**Tech stack:** Rust 2024, blocking `reqwest`, `osmpbf`, `quick-xml`, `serde`, optional `overturemaps` CLI, SRTM HGT files.
+**Tech stack:** Rust 2024 (MSRV 1.88), `osmpbf`, `quick-xml`, `serde`, and SRTM HGT files. The default `blocking` Cargo feature pulls in blocking `reqwest` for the Overpass, SRTM, and Overture-CLI orchestration paths; `default-features = false` compiles only the pure subset (data model, parsers, writer, cache I/O, filter, synthetic IDs, elevation). The `overturemaps` CLI remains an optional runtime dependency, never a compile-time one.
 
 ## System Architecture
 
@@ -94,16 +94,19 @@ graph TD
 
 | Module | Responsibility |
 | --- | --- |
-| `lib.rs` | Public module exports and crate-level usage documentation |
+| `lib.rs` | Public module exports, crate-level usage docs, and the `#![warn(missing_docs)]` gate |
 | `filter.rs` | `FeatureFilter` flags that control Overpass query categories |
-| `overpass.rs` | Overpass URL validation, query construction, HTTP fetch, and cache-aware OSM fetch |
-| `osm_cache.rs` | Endpoint-aware raw Overpass XML cache keys, reads, writes, and containment lookups |
-| `overture.rs` | Optional `overturemaps` CLI integration, GeoJSON cache, and Overture-to-OSM normalization |
+| `overpass.rs` | Overpass URL validation, query construction, HTTP fetch, and cache-aware OSM fetch. Gated behind the default `blocking` feature. Exposes `default_overpass_url() -> Cow<'static, str>` (reads `OVERPASS_URL` live, else a baked-in default). |
+| `osm_cache.rs` | Endpoint-aware raw Overpass XML cache keys, reads, writes, and containment lookups. The legacy bbox+filter family (`cache_key`, `read`, `write`, `find_containing`) is `#[deprecated]` in favor of the URL-aware `_for_url` variants. |
+| `cache_store.rs` | Generic `RawCache<Meta>` disk cache (data file + JSON sidecar) with an atomic write protocol; the shared implementation underneath `osm_cache` and `overture`. |
+| `overture/` | Optional `overturemaps` CLI integration, GeoJSON cache, and Overture-to-OSM normalization. Split into `theme`, `parse`, `cache`, and `cli` submodules; `cli` is gated behind `blocking`. |
 | `sources.rs` | High-level OSM/Overture orchestration, fallback policy, POI modes, and dedupe |
-| `osm.rs` | Normalized OSM data structures, XML/PBF parsing, merging, and XML serialization |
-| `cache.rs` | Shared cache root resolution and legacy cache migration |
-| `srtm.rs` | SRTM tile naming, tile discovery, downloading, and cache location |
+| `osm/` | Normalized OSM data model, XML/PBF parsing, merging, bbox clipping, and XML serialization. Split into `model`, `pbf`, `xml_parse` (single-pass plus streaming `parse_osm_xml_file`), and `xml_write` submodules. |
+| `cache.rs` | Shared cache root resolution and the `migrate_legacy_caches()` startup migration. Pure path getters never migrate. |
+| `srtm.rs` | SRTM tile naming, tile discovery, downloading, and cache location. Gated behind `blocking`. |
 | `elevation.rs` | HGT tile parsing and bilinear elevation sampling |
+| `synthetic_ids.rs` | Deterministic, non-overlapping negative-ID allocators for the OSM writer and Overture normalization, each in its own billion-wide band |
+| `source_options.rs` | CLI/config string parsers into `OvertureTheme`, `ThemePriority`, `PoiSourceMode`, and `OvertureFailureMode` |
 
 ## Source Orchestration
 
@@ -203,6 +206,8 @@ Default cache locations live under `~/.cache/par-osm-rust`. Environment override
 
 Legacy `osm-to-bedrock` cache directories are migrated into the shared default location only when an application explicitly calls `cache::migrate_legacy_caches()` once at startup. The `overpass_cache_dir`, `srtm_cache_dir`, and `overture_cache_dir` getters are pure path resolution and never migrate — keeping accessors side-effect-free and eliminating the first-call race between concurrent callers. Migration always targets the default shared location regardless of any `PAR_OSM_*_CACHE_DIR` / `*_CACHE_DIR` override; override directories are never touched.
 
+Both raw caches (`osm_cache` for Overpass XML and `overture` for GeoJSON) layer on top of `cache_store::RawCache<Meta>`: a generic data-file-plus-JSON-sidecar store with an atomic write protocol that finalizes the meta sidecar first and renames the data payload last, so the only committed state is "both files present." The Overture cache additionally stamps each entry with the `overturemaps` CLI version that wrote it and offers a TTL (default ~30 days via `OvertureParams::cache_ttl_secs`); entries whose age exceeds the TTL, or that were written under a different CLI version, are treated as misses and re-fetched.
+
 ## Data Model
 
 `osm::OsmData` is the normalized interchange format for downstream applications.
@@ -220,6 +225,8 @@ Legacy `osm-to-bedrock` cache directories are migrated into the shared default l
 
 `osm::FeatureSource` tracks whether features came from OSM, Overture, or synthetic generation. Overture geometry receives synthetic negative node IDs to avoid collisions with real OSM IDs.
 
+`OsmData` is encapsulated: its collections are `pub(crate)`, so external consumers construct instances through `OsmData::new` and extend them with `push_way`, then read back through the `iter_ways`, `way_id_at`, and `validate_invariants` accessors. `OsmWay` carries its own `pub id: i64` as the single source of truth consumed by the writer and `ways_by_id` — the prior `(id, way)` pair plumbing is gone. `parse_osm_xml_file` streams large `.osm` extracts from disk via a `BufReader` so peak memory stays bounded.
+
 ## Overpass Integration
 
 `overpass.rs` owns the Overpass HTTP boundary.
@@ -231,12 +238,13 @@ Legacy `osm-to-bedrock` cache directories are migrated into the shared default l
 - Send blocking HTTP requests with a crate-specific user agent.
 - Return readable errors for busy or failing Overpass responses.
 - Use URL-aware cache keys so different Overpass endpoints do not share stale raw XML.
+- Expose `default_overpass_url() -> Cow<'static, str>` so callers read the `OVERPASS_URL` override live on every call rather than freezing the endpoint at startup; returns a borrow of the baked-in default when unset.
 
 Applications that run async event loops should call Overpass fetches from a blocking worker thread.
 
 ## Overture Maps Integration
 
-`overture.rs` treats Overture as an optional runtime integration. The Rust crate does not depend on the Python package at compile time.
+`overture` treats Overture as an optional runtime integration. The Rust crate does not depend on the Python package at compile time, and the entire `cli` submodule (subprocess invocation and high-level fetch orchestration) is gated behind the default `blocking` Cargo feature. The `theme`, `parse`, and `cache` submodules remain available in the pure subset so GeoJSON normalization and cache I/O work without a network stack.
 
 **Runtime boundary:**
 
@@ -261,14 +269,16 @@ The elevation path is intentionally independent from OSM source orchestration. C
 | Overpass URL | HTTPS-only, no userinfo, approved host allowlist |
 | Cache path overrides | Environment variables select directories, but no cache content is trusted as executable code |
 | Overture CLI | Optional external process with per-command timeout and stderr truncation |
-| Synthetic IDs | Negative ID range avoids collisions with positive OSM IDs |
+| Synthetic IDs | Distinct billion-wide negative-ID bands per allocator (writer nodes, writer ways, writer relations, Overture) never overlap each other or positive OSM IDs |
 | Secrets | The crate does not require secrets for normal fetch, parse, cache, or publish-time operation |
 
 ## Operational Notes
 
 - Keep Overture disabled by default unless a caller explicitly opts in.
 - Prefer `sources::fetch_map_data` for application-facing source policy so downstream projects stay consistent.
-- Use endpoint-aware cache helpers for new Overpass fetch paths.
+- Use endpoint-aware cache helpers (`osm_cache::*_for_url`, versioned `overture_cache_key_with_version`) for new fetch paths.
+- The declared MSRV is 1.88; CI verifies the build on that toolchain. Build with `--no-default-features` for the pure parse/model/cache subset (no `reqwest`).
+- Run `make checkall` (format check, clippy with `-D warnings`, `cargo check`, and the full test suite) before committing; CI runs the same gate on Ubuntu, macOS, and Windows plus dedicated MSRV, docs, security-audit, and docs-lint jobs.
 - Run `cargo publish --dry-run` before publishing a new crate version.
 - Use the manual GitHub Actions publishing workflow rather than automatic publish-on-push.
 
