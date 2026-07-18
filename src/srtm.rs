@@ -25,8 +25,8 @@ pub fn cache_dir() -> PathBuf {
 
 // ── Tile utilities ─────────────────────────────────────────────────────────
 
-/// Return all 1°×1° tile SW corners needed to cover (`min_lat`, `min_lon`) –
-/// (`max_lat`, `max_lon`).
+/// Return all 1°×1° tile SW corners needed to cover (`south`, `west`) –
+/// (`north`, `east`).
 ///
 /// Each entry is `(lat_sw, lon_sw)` as signed integer degrees.
 pub fn tiles_for_bbox(min_lat: f64, min_lon: f64, max_lat: f64, max_lon: f64) -> Vec<(i32, i32)> {

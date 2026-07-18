@@ -110,7 +110,7 @@ pub struct OsmData {
     pub(crate) ways_by_id: HashMap<i64, usize>,
     /// Multipolygon relations.
     pub relations: Vec<OsmRelation>,
-    /// Bounding box: (min_lat, min_lon, max_lat, max_lon)
+    /// Bounding box: (south, west, north, east)
     pub bounds: Option<(f64, f64, f64, f64)>,
     /// Standalone nodes with POI tags (amenity, shop, tourism, leisure, historic).
     pub poi_nodes: Vec<OsmPoiNode>,
@@ -272,7 +272,7 @@ impl OsmData {
     /// * `poi_nodes`, `addr_nodes`, `tree_nodes` — `other`'s entries are
     ///   appended in order; no de-duplication.
     /// * `bounds` — when both sides have a bbox, the per-axis union is stored
-    ///   `(min(min_lat), min(min_lon), max(max_lat), max(max_lon))`. When only
+    ///   `(min(south), min(west), max(north), max(east))`. When only
     ///   one side has a bbox, that bbox is kept. When neither side has one,
     ///   `bounds` remain `None`.
     pub fn merge(&mut self, other: OsmData) {
@@ -301,7 +301,7 @@ impl OsmData {
 
     /// Clip data to a bounding box, keeping only features that touch the bbox.
     ///
-    /// `bbox` is `(min_lat, min_lon, max_lat, max_lon)`.
+    /// `bbox` is `(south, west, north, east)`.
     /// Ways are kept if at least one node falls inside the bbox.
     /// POI and address nodes are kept only if inside the bbox.
     /// Unreferenced nodes are pruned.

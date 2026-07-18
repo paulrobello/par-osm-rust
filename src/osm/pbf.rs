@@ -18,8 +18,8 @@ use super::model::{
 /// tags)` surface but through distinct types with no public shared trait, so
 /// the branches resolve those four values and hand them off here (QA-004).
 ///
-/// Updates the running bbox accumulator (`min_lat`/`min_lon`/`max_lat`/
-/// `max_lon`), inserts the node into `nodes`, and classifies the tags to push
+/// Updates the running bbox accumulator (`south`/`west`/`north`/
+/// `east`), inserts the node into `nodes`, and classifies the tags to push
 /// the node into the appropriate feature collection(s).
 ///
 /// Each parameter maps 1:1 to a local accumulator already in scope at the

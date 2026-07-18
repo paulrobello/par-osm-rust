@@ -264,7 +264,7 @@ pub(super) fn validate_cli_type(cli_type: &str) -> Result<()> {
 ///
 /// * `cli_type` – The Overture type string (e.g. `"building"`, `"segment"`).
 ///   Must not contain `-` or whitespace.
-/// * `bbox` – `(min_lat, min_lon, max_lat, max_lon)` bounding box.
+/// * `bbox` – `(south, west, north, east)` bounding box.
 /// * `timeout_secs` – Maximum wall-clock seconds to wait for the CLI.
 ///
 /// # Returns

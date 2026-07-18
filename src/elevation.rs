@@ -207,6 +207,25 @@ fn parse_hgt_filename(stem: &str) -> io::Result<(i32, i32)> {
 ///
 /// Load with [`ElevationData::from_path`] from a single `.hgt` file or a
 /// directory containing multiple `.hgt` files (non-recursive scan).
+///
+/// # Examples
+///
+/// Load a single SRTM tile and look up the elevation at a point inside it.
+/// The tile is memory-mapped from disk, so this example is `no_run` — it
+/// needs a real `.hgt` file at the given path.
+///
+/// ```no_run
+/// use par_osm_rust::elevation::ElevationData;
+/// use std::path::Path;
+///
+/// # fn main() -> anyhow::Result<()> {
+/// let data = ElevationData::from_path(Path::new("/srv/srtm/N48W123.hgt"))?;
+/// if let Some(metres) = data.elevation_at(48.5, -122.5) {
+///     println!("elevation: {metres:.0} m");
+/// }
+/// # Ok(())
+/// # }
+/// ```
 pub struct ElevationData {
     /// (lat_sw, lon_sw) → tile
     tiles: HashMap<(i32, i32), HgtTile>,

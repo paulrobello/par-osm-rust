@@ -116,6 +116,26 @@ pub fn overture_cache_dir() -> PathBuf {
 /// anything — if your application needs to pick up pre-existing
 /// `~/.cache/osm-to-bedrock/{overpass,srtm,overture}` directories, call this
 /// before any cache access.
+///
+/// # Examples
+///
+/// Call once at startup, before any cache access. The function inspects and
+/// writes to the user's shared cache directories, so the example is `no_run`.
+///
+/// ```no_run
+/// use par_osm_rust::cache::migrate_legacy_caches;
+///
+/// # fn main() -> anyhow::Result<()> {
+/// let report = migrate_legacy_caches()?;
+/// println!(
+///     "migrated overpass={} srtm={} overture={} entries",
+///     report.overpass.moved_files + report.overpass.copied_files,
+///     report.srtm.moved_files + report.srtm.copied_files,
+///     report.overture.moved_files + report.overture.copied_files,
+/// );
+/// # Ok(())
+/// # }
+/// ```
 pub fn migrate_legacy_caches() -> Result<MigrationReport> {
     Ok(MigrationReport {
         overpass: migrate_legacy_cache_dir("overpass")?,
