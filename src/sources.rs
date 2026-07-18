@@ -417,16 +417,15 @@ mod tests {
     }
 
     fn empty_data() -> OsmData {
-        OsmData {
-            nodes: HashMap::new(),
-            ways: Vec::new(),
-            ways_by_id: HashMap::new(),
-            relations: Vec::new(),
-            bounds: Some((0.0, 0.0, 1.0, 1.0)),
-            poi_nodes: Vec::new(),
-            addr_nodes: Vec::new(),
-            tree_nodes: Vec::new(),
-        }
+        OsmData::new(
+            HashMap::new(),
+            Vec::new(),
+            Vec::new(),
+            Some((0.0, 0.0, 1.0, 1.0)),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
     }
 
     fn poi(

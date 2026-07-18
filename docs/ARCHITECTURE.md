@@ -201,7 +201,7 @@ Default cache locations live under `~/.cache/par-osm-rust`. Environment override
 | Overture GeoJSON | `PAR_OSM_OVERTURE_CACHE_DIR`, then `OVERTURE_CACHE_DIR`, then shared default |
 | SRTM HGT | `PAR_OSM_SRTM_CACHE_DIR`, then `SRTM_CACHE_DIR`, then shared default |
 
-Legacy `osm-to-bedrock` cache directories are migrated only into default shared locations. Explicit override directories are not migrated automatically.
+Legacy `osm-to-bedrock` cache directories are migrated into the shared default location only when an application explicitly calls `cache::migrate_legacy_caches()` once at startup. The `overpass_cache_dir`, `srtm_cache_dir`, and `overture_cache_dir` getters are pure path resolution and never migrate — keeping accessors side-effect-free and eliminating the first-call race between concurrent callers. Migration always targets the default shared location regardless of any `PAR_OSM_*_CACHE_DIR` / `*_CACHE_DIR` override; override directories are never touched.
 
 ## Data Model
 

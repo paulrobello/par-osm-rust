@@ -155,16 +155,18 @@ Environment override priority:
 | SRTM HGT cache | `PAR_OSM_SRTM_CACHE_DIR`, then `SRTM_CACHE_DIR`, then shared default |
 | Overpass endpoint | `OVERPASS_URL`, then `https://overpass-api.de/api/interpreter` |
 
-On first use, the crate can migrate legacy caches from:
+Legacy caches from the older `osm-to-bedrock` layout can be migrated into the shared default location:
 
 - `~/.cache/osm-to-bedrock/overpass`
 - `~/.cache/osm-to-bedrock/overture`
 - `~/.cache/osm-to-bedrock/srtm`
 
-Consumers can explicitly migrate legacy caches before starting work:
+**Consumers MUST call [`cache::migrate_legacy_caches`] once at startup** to move these directories. The `overpass_cache_dir`, `srtm_cache_dir`, and `overture_cache_dir` getters (and the `osm_cache::cache_dir` / `srtm::cache_dir` wrappers) are pure path resolution and do **not** migrate anything.
 
 ```rust,no_run
 fn main() -> anyhow::Result<()> {
+    // Call once at startup, before any cache access. Idempotent: a second
+    // invocation is a no-op once the legacy directories are empty.
     let report = par_osm_rust::cache::migrate_legacy_caches()?;
     println!(
         "migrated overpass files: {}",
@@ -182,7 +184,7 @@ fn main() -> anyhow::Result<()> {
 }
 ```
 
-The regular `osm_cache::cache_dir()`, `overture::overture_cache_dir()`, and `srtm::cache_dir()` helpers also attempt default-location legacy migration on first use.
+Migration always targets the default shared location regardless of any `PAR_OSM_*_CACHE_DIR` / `*_CACHE_DIR` override the caller has set. Override directories are never touched by migration.
 
 ### Overpass cache isolation
 
@@ -196,11 +198,18 @@ Use `osm_cache::cache_key_for_url`, `read_for_url`, `write_for_url`, and `find_c
 
 ## Normalized OSM data model
 
-The central type is `osm::OsmData`:
+The central type is `osm::OsmData`. The `ways` and `ways_by_id` fields are coupled (every way has exactly one entry in the index mapping its OSM id to its position) and are encapsulated: construction goes through [`osm::OsmData::new`] and incremental mutation through [`osm::OsmData::push_way`], so external code cannot put the pair out of sync. Accessors:
+
+- `new(nodes, ways_with_ids, relations, bounds, poi_nodes, addr_nodes, tree_nodes)` constructs an `OsmData` and seeds `ways_by_id` from the `(id, way)` pairs.
+- `push_way(id, way)` appends a way and updates `ways_by_id` atomically.
+- `iter_ways()` borrows the ways slice in insertion order.
+- `way_id_at(index)` recovers a way's OSM id by index.
+- `validate_invariants()` verifies the `ways` / `ways_by_id` pair (called automatically in debug builds from `new`/`push_way`).
+
+Top-level collections:
 
 - `nodes`: OSM or synthetic node coordinates keyed by ID.
-- `ways`: ordered node-reference geometry with tags.
-- `ways_by_id`: relation lookup index into `ways`.
+- `ways` / `ways_by_id`: ordered node-reference geometry with tags, plus the id→index lookup used for relation member resolution.
 - `relations`: multipolygon relations and roles.
 - `bounds`: optional dataset bounding box.
 - `poi_nodes`: renderable/tagged POI nodes.

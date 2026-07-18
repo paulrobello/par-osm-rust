@@ -578,8 +578,7 @@ pub fn parse_overture_geojson(geojson_str: &str, theme: OvertureTheme) -> Result
         .unwrap_or(&[]);
 
     let mut nodes: HashMap<i64, OsmNode> = HashMap::new();
-    let mut ways: Vec<OsmWay> = Vec::new();
-    let mut ways_by_id: HashMap<i64, usize> = HashMap::new();
+    let mut ways_with_ids: Vec<(i64, OsmWay)> = Vec::new();
     let mut poi_nodes: Vec<OsmPoiNode> = Vec::new();
     let mut addr_nodes: Vec<OsmPoiNode> = Vec::new();
     let mut tree_nodes: Vec<OsmNode> = Vec::new();
@@ -645,9 +644,7 @@ pub fn parse_overture_geojson(geojson_str: &str, theme: OvertureTheme) -> Result
                     );
                     if !node_refs.is_empty() {
                         let way_id = next_synthetic_id();
-                        let idx = ways.len();
-                        ways.push(OsmWay { tags, node_refs });
-                        ways_by_id.insert(way_id, idx);
+                        ways_with_ids.push((way_id, OsmWay { tags, node_refs }));
                         nodes.extend(new_nodes);
                     }
                 }
@@ -669,9 +666,7 @@ pub fn parse_overture_geojson(geojson_str: &str, theme: OvertureTheme) -> Result
                     );
                     if !node_refs.is_empty() {
                         let way_id = next_synthetic_id();
-                        let idx = ways.len();
-                        ways.push(OsmWay { tags, node_refs });
-                        ways_by_id.insert(way_id, idx);
+                        ways_with_ids.push((way_id, OsmWay { tags, node_refs }));
                         nodes.extend(new_nodes);
                     }
                 }
@@ -695,12 +690,13 @@ pub fn parse_overture_geojson(geojson_str: &str, theme: OvertureTheme) -> Result
                             );
                             if !node_refs.is_empty() {
                                 let way_id = next_synthetic_id();
-                                let idx = ways.len();
-                                ways.push(OsmWay {
-                                    tags: tags.clone(),
-                                    node_refs,
-                                });
-                                ways_by_id.insert(way_id, idx);
+                                ways_with_ids.push((
+                                    way_id,
+                                    OsmWay {
+                                        tags: tags.clone(),
+                                        node_refs,
+                                    },
+                                ));
                                 nodes.extend(new_nodes);
                             }
                         }
@@ -720,16 +716,15 @@ pub fn parse_overture_geojson(geojson_str: &str, theme: OvertureTheme) -> Result
         None
     };
 
-    Ok(OsmData {
+    Ok(OsmData::new(
         nodes,
-        ways,
-        ways_by_id,
-        relations: Vec::new(),
+        ways_with_ids,
+        Vec::new(),
         bounds,
         poi_nodes,
         addr_nodes,
         tree_nodes,
-    })
+    ))
 }
 
 // ── Overture cache ────────────────────────────────────────────────────────
@@ -921,16 +916,15 @@ fn clear_overture_cache_dir(dir: &Path, min_age: Option<chrono::Duration>) -> Re
 
 /// Create an empty [`OsmData`] to accumulate merged results into.
 fn empty_osm_data() -> OsmData {
-    OsmData {
-        nodes: HashMap::new(),
-        ways: vec![],
-        ways_by_id: HashMap::new(),
-        relations: vec![],
-        bounds: None,
-        poi_nodes: vec![],
-        addr_nodes: vec![],
-        tree_nodes: vec![],
-    }
+    OsmData::new(
+        HashMap::new(),
+        Vec::new(),
+        Vec::new(),
+        None,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    )
 }
 
 /// Fetch and parse Overture Maps data for all enabled themes, merging into a

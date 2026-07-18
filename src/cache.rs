@@ -39,6 +39,11 @@ pub fn legacy_cache_root() -> PathBuf {
 
 /// Return the Overpass XML cache directory, creating it if possible.
 ///
+/// Pure path resolution: resolves the directory per the priority below and
+/// creates it if missing. Performs no legacy migration — call
+/// [`migrate_legacy_caches`] once at startup to move legacy
+/// `osm-to-bedrock` caches into the shared default location.
+///
 /// Priority:
 /// 1. `PAR_OSM_OVERPASS_CACHE_DIR`
 /// 2. `OVERPASS_CACHE_DIR`
@@ -48,11 +53,15 @@ pub fn overpass_cache_dir() -> PathBuf {
         .or_else(|| env_dir("OVERPASS_CACHE_DIR"))
         .unwrap_or_else(|| shared_cache_root().join("overpass"));
     ensure_dir(&dir, "Overpass");
-    migrate_legacy_cache_dir_if_default(&dir, "overpass");
     dir
 }
 
 /// Return the SRTM tile cache directory, creating it if possible.
+///
+/// Pure path resolution: resolves the directory per the priority below and
+/// creates it if missing. Performs no legacy migration — call
+/// [`migrate_legacy_caches`] once at startup to move legacy
+/// `osm-to-bedrock` caches into the shared default location.
 ///
 /// Priority:
 /// 1. `PAR_OSM_SRTM_CACHE_DIR`
@@ -63,29 +72,37 @@ pub fn srtm_cache_dir() -> PathBuf {
         .or_else(|| env_dir("SRTM_CACHE_DIR"))
         .unwrap_or_else(|| shared_cache_root().join("srtm"));
     ensure_dir(&dir, "SRTM");
-    migrate_legacy_cache_dir_if_default(&dir, "srtm");
     dir
 }
 
 /// Return the Overture GeoJSON cache directory, creating it if possible.
+///
+/// Pure path resolution: resolves the directory per the priority below and
+/// creates it if missing. Performs no legacy migration — call
+/// [`migrate_legacy_caches`] once at startup to move legacy
+/// `osm-to-bedrock` caches into the shared default location.
 ///
 /// Priority:
 /// 1. `PAR_OSM_OVERTURE_CACHE_DIR`
 /// 2. `OVERTURE_CACHE_DIR`
 /// 3. shared default `overture` directory
 pub fn overture_cache_dir() -> PathBuf {
-    let override_dir =
-        env_dir("PAR_OSM_OVERTURE_CACHE_DIR").or_else(|| env_dir("OVERTURE_CACHE_DIR"));
-    let is_default = override_dir.is_none();
-    let dir = override_dir.unwrap_or_else(|| shared_cache_root().join("overture"));
+    let dir = env_dir("PAR_OSM_OVERTURE_CACHE_DIR")
+        .or_else(|| env_dir("OVERTURE_CACHE_DIR"))
+        .unwrap_or_else(|| shared_cache_root().join("overture"));
     ensure_dir(&dir, "Overture");
-    if is_default {
-        migrate_legacy_cache_dir_if_default(&dir, "overture");
-    }
     dir
 }
 
-/// Migrate legacy osm-to-bedrock Overpass, SRTM, and Overture caches into shared defaults.
+/// Migrate legacy `osm-to-bedrock` Overpass, SRTM, and Overture caches into
+/// the shared default location.
+///
+/// This is the explicit entry point downstream applications call **once at
+/// startup**. The [`overpass_cache_dir`], [`srtm_cache_dir`], and
+/// [`overture_cache_dir`] getters are pure path resolution and do not migrate
+/// anything — if your application needs to pick up pre-existing
+/// `~/.cache/osm-to-bedrock/{overpass,srtm,overture}` directories, call this
+/// before any cache access.
 pub fn migrate_legacy_caches() -> Result<MigrationReport> {
     Ok(MigrationReport {
         overpass: migrate_legacy_cache_dir("overpass")?,
@@ -116,17 +133,6 @@ fn ensure_dir(dir: &Path, label: &str) {
             "Could not create {label} cache dir {}: {err}",
             dir.display()
         );
-    }
-}
-
-fn migrate_legacy_cache_dir_if_default(shared_dir: &Path, subdir: &str) {
-    let expected_default = shared_cache_root().join(subdir);
-    if shared_dir != expected_default {
-        return;
-    }
-
-    if let Err(err) = migrate_legacy_cache_dir(subdir) {
-        log::warn!("Legacy {subdir} cache migration failed: {err:#}");
     }
 }
 
@@ -435,7 +441,10 @@ mod tests {
     }
 
     #[test]
-    fn overpass_cache_default_migrates_legacy_files_on_first_use() {
+    fn overpass_cache_dir_does_not_migrate_legacy_files() {
+        // Getters are now pure path resolution (ARC-005): the legacy file
+        // must remain in place. Explicit migration is covered by
+        // `migration_moves_legacy_files_into_empty_shared_dir`.
         let _guard = env_lock().lock().unwrap();
         let env = EnvSnapshot::capture();
         isolate_cache_env(&env);
@@ -447,14 +456,15 @@ mod tests {
 
         let dir = overpass_cache_dir();
 
-        let shared_file = dir.join("abc.xml");
         assert_eq!(dir, tmp.path().join(".cache/par-osm-rust/overpass"));
-        assert!(shared_file.exists());
-        assert!(!legacy.join("abc.xml").exists());
+        assert!(!dir.join("abc.xml").exists());
+        assert!(legacy.join("abc.xml").exists());
     }
 
     #[test]
-    fn overture_cache_default_migrates_legacy_files_on_first_use() {
+    fn overture_cache_dir_does_not_migrate_legacy_files() {
+        // Getters are pure path resolution (ARC-005); migration is an
+        // explicit step (`migrate_legacy_caches`) tested separately.
         let _guard = env_lock().lock().unwrap();
         let env = EnvSnapshot::capture();
         isolate_cache_env(&env);
@@ -468,14 +478,15 @@ mod tests {
         let dir = crate::overture::overture_cache_dir();
 
         assert_eq!(dir, tmp.path().join(".cache/par-osm-rust/overture"));
-        assert!(dir.join("places.geojson").exists());
-        assert!(dir.join("places.meta.json").exists());
-        assert!(!legacy.join("places.geojson").exists());
-        assert!(!legacy.join("places.meta.json").exists());
+        assert!(!dir.join("places.geojson").exists());
+        assert!(!dir.join("places.meta.json").exists());
+        assert!(legacy.join("places.geojson").exists());
+        assert!(legacy.join("places.meta.json").exists());
     }
 
     #[test]
-    fn overture_cache_default_merges_legacy_files_into_non_empty_shared_dir() {
+    fn overture_cache_dir_does_not_merge_into_non_empty_shared_dir() {
+        // Bare getter leaves both legacy and shared dirs untouched.
         let _guard = env_lock().lock().unwrap();
         let env = EnvSnapshot::capture();
         isolate_cache_env(&env);
@@ -491,19 +502,49 @@ mod tests {
         let dir = crate::overture::overture_cache_dir();
 
         assert_eq!(dir, shared);
+        assert!(!dir.join("area-a.geojson").exists());
         assert_eq!(
-            fs::read_to_string(dir.join("area-a.geojson")).unwrap(),
+            fs::read_to_string(dir.join("area-b.geojson")).unwrap(),
+            "shared-b"
+        );
+        assert!(legacy.join("area-a.geojson").exists());
+    }
+
+    #[test]
+    fn overture_explicit_migration_merges_legacy_files_into_non_empty_shared_dir() {
+        // ARC-005: relocated from the old "getter merges" test. Overture is
+        // the only subdir that merges into a non-empty shared dir (see
+        // `migrate_legacy_cache_dir`).
+        let _guard = env_lock().lock().unwrap();
+        let env = EnvSnapshot::capture();
+        isolate_cache_env(&env);
+        let tmp = TempDir::new().unwrap();
+        env.set_path("HOME", tmp.path());
+        let legacy = tmp.path().join(".cache/osm-to-bedrock/overture");
+        let shared = tmp.path().join(".cache/par-osm-rust/overture");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::create_dir_all(&shared).unwrap();
+        fs::write(legacy.join("area-a.geojson"), "legacy-a").unwrap();
+        fs::write(shared.join("area-b.geojson"), "shared-b").unwrap();
+
+        let report = migrate_legacy_cache_dir("overture").unwrap();
+
+        assert_eq!(report.moved_files + report.copied_files, 1);
+        assert_eq!(
+            fs::read_to_string(shared.join("area-a.geojson")).unwrap(),
             "legacy-a"
         );
         assert_eq!(
-            fs::read_to_string(dir.join("area-b.geojson")).unwrap(),
+            fs::read_to_string(shared.join("area-b.geojson")).unwrap(),
             "shared-b"
         );
         assert!(!legacy.join("area-a.geojson").exists());
     }
 
     #[test]
-    fn overture_cache_env_override_does_not_migrate_legacy_files() {
+    fn overture_cache_dir_with_env_override_does_not_migrate() {
+        // Getter resolves to the override and performs no migration;
+        // explicit migration is the only path that touches the filesystem.
         let _guard = env_lock().lock().unwrap();
         let env = EnvSnapshot::capture();
         isolate_cache_env(&env);
@@ -528,7 +569,41 @@ mod tests {
     }
 
     #[test]
-    fn overture_cache_override_matching_default_does_not_migrate_legacy_files() {
+    fn migrate_legacy_caches_with_env_override_targets_default_not_override() {
+        // ARC-005: explicit migration always targets the default shared dir,
+        // independent of any env override the caller has set.
+        let _guard = env_lock().lock().unwrap();
+        let env = EnvSnapshot::capture();
+        isolate_cache_env(&env);
+        let tmp = TempDir::new().unwrap();
+        env.set_path("HOME", tmp.path());
+        let override_dir = tmp.path().join("custom-overture-cache");
+        fs::create_dir_all(&override_dir).unwrap();
+        env.set_path("PAR_OSM_OVERTURE_CACHE_DIR", &override_dir);
+        let legacy = tmp.path().join(".cache/osm-to-bedrock/overture");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("places.geojson"), "{}").unwrap();
+
+        let report = migrate_legacy_caches().unwrap();
+
+        assert_eq!(
+            report.overture.moved_files + report.overture.copied_files,
+            1
+        );
+        // Migration went into the default shared dir, not the override.
+        assert!(
+            tmp.path()
+                .join(".cache/par-osm-rust/overture/places.geojson")
+                .exists()
+        );
+        assert!(!override_dir.join("places.geojson").exists());
+        assert!(!legacy.join("places.geojson").exists());
+    }
+
+    #[test]
+    fn overture_cache_dir_with_override_matching_default_does_not_migrate() {
+        // Setting OVERTURE_CACHE_DIR to the default path resolves the same
+        // directory; the getter is still pure and does not migrate.
         let _guard = env_lock().lock().unwrap();
         let env = EnvSnapshot::capture();
         isolate_cache_env(&env);
