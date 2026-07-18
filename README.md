@@ -97,7 +97,7 @@ use par_osm_rust::{filter::FeatureFilter, overpass};
 fn main() -> anyhow::Result<()> {
     let bbox = (38.0, -121.0, 38.01, -120.99);
     let url = overpass::default_overpass_url();
-    let data = overpass::fetch_osm_data(bbox, &FeatureFilter::default(), true, url)?;
+    let data = overpass::fetch_osm_data(bbox, &FeatureFilter::default(), true, &url)?;
     println!("ways: {}", data.iter_ways().count());
     Ok(())
 }
