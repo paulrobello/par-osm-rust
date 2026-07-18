@@ -33,7 +33,8 @@ const ALLOWED_OVERPASS_HOSTS: &[&str] = &[
 ///
 /// Rejects any URL that:
 /// - does not use HTTPS,
-/// - includes userinfo, or
+/// - includes userinfo,
+/// - specifies a port other than 443 (explicit `:443` or no port both pass), or
 /// - whose host is not in `ALLOWED_OVERPASS_HOSTS`.
 ///
 /// Returns `Ok(())` if the URL is acceptable, or an error with a descriptive
@@ -48,6 +49,20 @@ pub fn validate_overpass_url(url: &str) -> Result<()> {
 
     if !parsed.username().is_empty() || parsed.password().is_some() {
         bail!("Overpass URL must not include userinfo");
+    }
+
+    // SEC-011: pin the port to 443 on allowlisted HTTPS hosts. Both an
+    // explicit `:443` and an omitted port are accepted; any other port is
+    // rejected. This tightens the SSRF allowlist so a compromised allowlisted
+    // mirror cannot redirect traffic to an unrelated service bound to a
+    // non-443 port on the same host.
+    if let Some(port) = parsed.port() {
+        if port != 443 {
+            bail!(
+                "Overpass URL must use port 443 (or omit the port) on an approved host; \
+                 got port {port}"
+            );
+        }
     }
 
     let host = parsed
@@ -67,15 +82,33 @@ pub fn validate_overpass_url(url: &str) -> Result<()> {
 }
 
 /// Resolve the Overpass API URL.
-/// Priority: `OVERPASS_URL` env var → hardcoded default.
+///
+/// Reads the `OVERPASS_URL` environment variable **live on every call** (env
+/// reads are cheap), so changes to the env var between fetches take effect
+/// immediately — there is no process-wide freeze (the previous `OnceLock`
+/// cache surprised callers who set the env var between fetches).
+///
+/// Priority: `OVERPASS_URL` env var → hardcoded [`DEFAULT_OVERPASS_URL`].
+///
+/// # Why `Box::leak`
+///
+/// The return type is `&'static str` for API compatibility with
+/// [`fetch_osm_xml`] and with callers that unify this function's result
+/// against `&str` in match arms. When the env var is set, the owned `String`
+/// is leaked via `Box::leak` to promote it to the `'static` lifetime. This is
+/// acceptable because:
+///   - this function is called at most a handful of times per process (once
+///     per top-level fetch, alongside a network request that dwarfs the
+///     allocation cost), and
+///   - each leak is bounded by the URL length (~50–100 bytes).
+///
+/// When the env var is unset, the `DEFAULT_OVERPASS_URL` static constant is
+/// returned directly with no allocation.
 pub fn default_overpass_url() -> &'static str {
-    use std::sync::OnceLock;
-    static RESOLVED: OnceLock<String> = OnceLock::new();
-    RESOLVED
-        .get_or_init(|| {
-            std::env::var("OVERPASS_URL").unwrap_or_else(|_| DEFAULT_OVERPASS_URL.to_string())
-        })
-        .as_str()
+    match std::env::var("OVERPASS_URL") {
+        Ok(url) => &*Box::leak(url.into_boxed_str()),
+        Err(_) => DEFAULT_OVERPASS_URL,
+    }
 }
 
 /// Build an Overpass QL query (XML output) for the given bounding box,
@@ -180,12 +213,44 @@ fn str_suffix_at_boundary(s: &str, max_bytes: usize) -> &str {
     &s[start..]
 }
 
+/// Lazily-initialized shared `reqwest::blocking::Client` for Overpass requests.
+///
+/// Reused across calls to enable HTTP connection pooling — repeated fetches
+/// to the same allowlisted mirror reuse the underlying TCP/TLS connection
+/// instead of paying setup cost on every call (ARC-020).
+///
+/// Per-module configuration preserved on the pooled client:
+///   - `redirect(Policy::none())` — Phase 1 SSRF hardening (SEC-002): never
+///     follow redirects so a compromised allowlisted mirror cannot bypass the
+///     URL allowlist by 30x-ing to an internal host.
+///   - `OVERPASS_TIMEOUT_SECS` (60 s) request timeout.
+///
+/// Built with `OnceLock::get_or_init` so the first successful build is reused
+/// for the process lifetime; a build failure propagates as an `anyhow::Error`
+/// via `?` instead of panicking. (`OnceLock::get_or_try_init` is unstable on
+/// stable Rust — see issue #109737 — so we check-then-init manually. Two
+/// racing callers may each build a client; the loser's is discarded.)
+fn shared_client() -> Result<&'static reqwest::blocking::Client> {
+    use std::sync::OnceLock;
+    static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+    if let Some(c) = CLIENT.get() {
+        return Ok(c);
+    }
+    let c = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(OVERPASS_TIMEOUT_SECS))
+        .build()
+        .map_err(|e| anyhow::anyhow!("Failed to build Overpass HTTP client: {e}"))?;
+    Ok(CLIENT.get_or_init(|| c))
+}
+
 /// Fetch raw OSM XML from the Overpass API for the given bounding box.
 ///
 /// - Validates `overpass_url` against an approved host allowlist (SSRF guard).
 /// - Validates `bbox` before making any network request.
 /// - Returns a user-readable error for HTTP 429 (server busy).
-/// - Uses a blocking `reqwest` client (call from `spawn_blocking`).
+/// - Uses the pooled blocking `reqwest` client (call from `spawn_blocking`);
+///   see [`shared_client`] for why the client is reused across calls.
 /// - Follows no redirects: any 3xx is treated as an error so a compromised
 ///   allowlisted mirror cannot redirect the POST to an internal host (the
 ///   allowlist is only enforced against the initial URL).
@@ -197,12 +262,9 @@ pub fn fetch_osm_xml(
     validate_overpass_url(overpass_url)?;
     let query = build_overpass_query(bbox, filter)?;
 
-    let client = reqwest::blocking::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(OVERPASS_TIMEOUT_SECS))
-        .build()?;
+    let client = shared_client()?;
 
-    let request = build_overpass_request(&client, overpass_url, &query)?;
+    let request = build_overpass_request(client, overpass_url, &query)?;
     let res = client.execute(request)?;
 
     if res.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
@@ -446,7 +508,26 @@ mod tests {
     fn url_with_port_on_approved_host_is_accepted() {
         assert!(
             validate_overpass_url("https://overpass-api.de:443/api/interpreter").is_ok(),
-            "explicit port on approved host should be allowed"
+            "explicit :443 on approved host should be allowed"
+        );
+    }
+
+    #[test]
+    fn url_with_non_443_port_on_approved_host_is_rejected() {
+        let err = validate_overpass_url("https://overpass-api.de:8080/api/interpreter");
+        assert!(
+            err.is_err(),
+            "non-443 port on approved host must be rejected (SEC-011)"
+        );
+        let msg = err.unwrap_err().to_string();
+        assert!(msg.contains("443"), "error should mention port 443: {msg}");
+    }
+
+    #[test]
+    fn url_with_non_443_port_on_mirror_is_rejected() {
+        assert!(
+            validate_overpass_url("https://overpass.kumi.systems:8443/api/interpreter").is_err(),
+            "non-443 port on any allowlisted host must be rejected"
         );
     }
 
@@ -465,5 +546,79 @@ mod tests {
             validate_overpass_url("https://user:pass@overpass-api.de/api/interpreter").is_err(),
             "userinfo must be rejected even when host is approved"
         );
+    }
+
+    // ── default_overpass_url (ARC-010 / QA-017) ───────────────────────────
+    //
+    // The env var is read live on every call, so changes between calls take
+    // effect immediately (no OnceLock freeze). A module-level Mutex
+    // serializes these tests so they don't race on `OVERPASS_URL` with each
+    // other; the `EnvGuard` RAII handle restores the prior value (or unsets)
+    // on drop so a panic mid-test cannot poison other tests.
+
+    static OVERPASS_URL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// RAII guard that restores `OVERPASS_URL` to its previous value on drop.
+    struct EnvGuard {
+        previous: Option<String>,
+    }
+    impl EnvGuard {
+        fn set(value: &str) -> Self {
+            // SAFETY: tests under this lock are serialized by
+            // `OVERPASS_URL_ENV_LOCK`, so there is no concurrent env mutation
+            // from this module. (Other test modules in the binary do not
+            // touch `OVERPASS_URL`.)
+            let previous = std::env::var("OVERPASS_URL").ok();
+            // SAFETY: same single-test serialization as above; `set_var` is
+            // `unsafe` under Edition 2024 (SEC-007) but mutation is guarded.
+            unsafe { std::env::set_var("OVERPASS_URL", value) };
+            Self { previous }
+        }
+        fn unset() -> Self {
+            // SAFETY: see `set`.
+            let previous = std::env::var("OVERPASS_URL").ok();
+            // SAFETY: see `set`.
+            unsafe { std::env::remove_var("OVERPASS_URL") };
+            Self { previous }
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                // SAFETY: see `set`.
+                Some(v) => unsafe { std::env::set_var("OVERPASS_URL", v) },
+                // SAFETY: see `set`.
+                None => unsafe { std::env::remove_var("OVERPASS_URL") },
+            }
+        }
+    }
+
+    #[test]
+    fn default_overpass_url_reads_env_live_between_calls() {
+        let _guard = OVERPASS_URL_ENV_LOCK.lock().unwrap();
+
+        // Env unset → hardcoded default.
+        let _g0 = EnvGuard::unset();
+        assert_eq!(default_overpass_url(), DEFAULT_OVERPASS_URL);
+
+        // Set env → reflected immediately on next call (no freeze).
+        let _g1 = EnvGuard::set("https://overpass.kumi.systems/api/interpreter");
+        assert_eq!(
+            default_overpass_url(),
+            "https://overpass.kumi.systems/api/interpreter"
+        );
+
+        // Change env between calls → next call sees the new value.
+        let _g2 = EnvGuard::set("https://overpass.openstreetmap.ru/api/interpreter");
+        assert_eq!(
+            default_overpass_url(),
+            "https://overpass.openstreetmap.ru/api/interpreter"
+        );
+
+        // Unset between calls → next call falls back to default.
+        drop(_g2);
+        drop(_g1);
+        let _g3 = EnvGuard::unset();
+        assert_eq!(default_overpass_url(), DEFAULT_OVERPASS_URL);
     }
 }

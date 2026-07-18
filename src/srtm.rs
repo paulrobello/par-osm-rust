@@ -54,6 +54,41 @@ pub fn tile_name(lat: i32, lon: i32) -> String {
 
 // ── Download ───────────────────────────────────────────────────────────────
 
+/// Lazily-initialized shared `reqwest::blocking::Client` for SRTM tile downloads.
+///
+/// Reused across calls to enable HTTP connection pooling — downloading many
+/// tiles from the same S3 host reuses the underlying TCP/TLS connection
+/// instead of paying setup cost on every call (ARC-020).
+///
+/// Configuration preserved on the pooled client:
+///   - `redirect(Policy::none())` — defense-in-depth (SEC-003): the URL is a
+///     hardcoded const + integer-derived tile name (bounded), but disabling
+///     redirects prevents any future change to the URL scheme from silently
+///     enabling redirect-based attacks, and matches the Overpass client's
+///     posture.
+///   - 120 s timeout (SEC-007) — SRTM1 tiles are ~25 MB; allow generous time
+///     for slow connections so we don't indefinitely block the Tokio thread
+///     pool.
+///
+/// Built with `OnceLock::get_or_init` so the first successful build is reused
+/// for the process lifetime; a build failure propagates as an `anyhow::Error`
+/// via `?` instead of panicking. (`OnceLock::get_or_try_init` is unstable on
+/// stable Rust — see issue #109737 — so we check-then-init manually. Two
+/// racing callers may each build a client; the loser's is discarded.)
+fn shared_client() -> Result<&'static reqwest::blocking::Client> {
+    use std::sync::OnceLock;
+    static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+    if let Some(c) = CLIENT.get() {
+        return Ok(c);
+    }
+    let c = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|e| anyhow::anyhow!("Failed to build HTTP client: {e}"))?;
+    Ok(CLIENT.get_or_init(|| c))
+}
+
 /// Download, decompress, and save a single SRTM tile to `dest_dir`.
 ///
 /// Skips the download if the `.hgt` file already exists.
@@ -74,12 +109,7 @@ pub fn download_tile(lat: i32, lon: i32, dest_dir: &Path) -> Result<bool> {
 
     log::info!("Downloading elevation tile {name}…");
 
-    // SEC-007: use an explicit timeout to prevent indefinitely blocking the
-    // Tokio thread pool on stalled S3 connections.
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .map_err(|e| anyhow::anyhow!("Failed to build HTTP client: {e}"))?;
+    let client = shared_client()?;
 
     let response = client
         .get(&url)
