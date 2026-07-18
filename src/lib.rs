@@ -50,6 +50,7 @@
 //! - [`overpass`] builds safe Overpass QL queries and fetches raw OSM XML.
 //! - [`osm_cache`] stores URL-aware raw Overpass XML cache entries.
 //! - [`overture`] invokes the optional `overturemaps` CLI and normalizes GeoJSON.
+//! - [`source_options`] parses CLI/config strings into source-selection enums.
 //! - [`sources`] merges OSM and Overture data with POI source policy and fallback.
 //! - [`osm`] parses PBF/XML and writes normalized OSM XML.
 //! - [`srtm`] and [`elevation`] download/read HGT elevation data.
@@ -62,5 +63,6 @@ pub mod osm;
 pub mod osm_cache;
 pub mod overpass;
 pub mod overture;
+pub mod source_options;
 pub mod sources;
 pub mod srtm;
