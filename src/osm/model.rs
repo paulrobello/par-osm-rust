@@ -205,6 +205,31 @@ impl OsmData {
         self.ways.get(index).map(|way| way.id)
     }
 
+    /// Borrow the node map keyed by OSM id.
+    ///
+    /// Downstream consumers resolve way node references (terrain, geometry,
+    /// sign placement) through this map. Exposed as a read view so the field's
+    /// `pub(crate)` encapsulation does not block id lookups.
+    pub fn nodes(&self) -> &HashMap<i64, OsmNode> {
+        &self.nodes
+    }
+
+    /// Borrow the ways slice in insertion order.
+    ///
+    /// Index `i` here is the same index stored in [`OsmData::ways_by_id`] and
+    /// yielded positionally by [`OsmData::iter_ways`].
+    pub fn ways(&self) -> &[OsmWay] {
+        &self.ways
+    }
+
+    /// Borrow the way-id to ways-index lookup map.
+    ///
+    /// Used to resolve multipolygon relation members to their way position in
+    /// [`OsmData::ways`].
+    pub fn ways_by_id(&self) -> &HashMap<i64, usize> {
+        &self.ways_by_id
+    }
+
     /// Verify the `ways` / `ways_by_id` invariant: equal lengths, every
     /// stored index is in range, no two ids share an index, and each
     /// `ways_by_id[ways[idx].id] == idx` (the per-way consistency check
