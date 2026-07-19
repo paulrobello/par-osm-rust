@@ -9,6 +9,54 @@ Released versions are published to [crates.io](https://crates.io/crates/par-osm-
 
 ## [Unreleased]
 
+### Changed
+
+- **Cargo.lock is now committed (SEC-107, reverses ARC-017).** Library crates
+  can legitimately go either way per current Cargo guidance; this repo now
+  commits the lockfile so CI, `cargo audit`, and publishes resolve a fixed
+  dependency graph (249 transitive crates), giving a meaningful review point
+  for any version drift. The audit job no longer regenerates the lockfile.
+  Maintenance: run `cargo update` periodically (roughly monthly) and review
+  the diff before merging — a Dependabot `cargo` entry may replace this
+  manual cadence in a future release.
+
+- **Overpass response buffering is now bounded (SEC-109).** `fetch_osm_xml`
+  reads successful responses through a `take(MAX + 1)` adapter capped at
+  2 GiB — generous, since large-area queries legitimately return hundreds of
+  MB — and rejects oversized responses without buffering them fully. The
+  error-path read is bounded at 64 KiB (only 4 KiB is surfaced into the
+  error message after truncation, so reading more was waste).
+
+### Security
+
+- **CI supply-chain hardening (SEC-106).** All third-party GitHub Actions
+  across `ci.yml` and `publish-crates.yml` are pinned to full commit SHAs
+  (with the prior tag preserved as a comment), `ci.yml` now declares a
+  top-level `permissions: contents: read`, and the unmaintained
+  `Ilshidur/action-discord@0.4.0` publish-notification step (which received
+  the `DISCORD_WEBHOOK` secret) is replaced with a first-party `curl` call.
+  Pinned actions: `actions/checkout@de0fac2e` (v6.0.2),
+  `dtolnay/rust-toolchain@4cda84d5` (stable branch),
+  `Swatinem/rust-cache@c1937114` (v2.9.1),
+  `taiki-e/install-action@07b4745e` (v2.83.4),
+  `DavidAnson/markdownlint-cli2-action@8de2aa07` (v24.0.0),
+  `lycheeverse/lychee-action@e7477775` (v2.9.0).
+
+- **`cargo audit --deny unsound` CI gate (SEC-103).** The audit job now
+  fails the build on any new "unsound" advisory rather than exiting 0.
+  `.cargo/audit.toml` ignores `RUSTSEC-2026-0186` (`memmap2 0.5.10` via
+  `osmpbf 0.3.8`), which is verified-unreachable: `parse_pbf` reads via
+  `osmpbf`'s `ElementReader` → `BlobReader` → `BufReader` (buffered I/O),
+  not `mmap_blob`. The ignore will be removed when osmpbf bumps memmap2 to
+  ≥ 0.9.
+
+- **`parse_pbf` doc correction (SEC-103).** The rustdoc previously claimed
+  `parse_pbf` memory-mapped its input and warned about a `SIGBUS` hazard if
+  the backing file shrank underneath the reader. This was incorrect —
+  `ElementReader::from_path` streams blobs through `BufReader<File>` and
+  never calls `mmap_blob`. The doc now accurately describes the buffered
+  I/O model and notes the `memmap2` advisory is unreachable from this path.
+
 ### Deprecated
 
 - **`ThemePriority` API surface (ARC-102).** `overture::ThemePriority`,

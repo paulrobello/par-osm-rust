@@ -1,0 +1,15 @@
+# cargo-audit configuration (SEC-103).
+#
+# The CI audit job runs `cargo audit --deny unsound` so any new "unsound"
+# advisory fails the build. The single ignore below is verified-unreachable
+# from this crate: osmpbf's `ElementReader` (used by `parse_pbf` in
+# src/osm/pbf.rs) reads via `BlobReader` over a `BufReader<File>` — buffered
+# I/O, not memory-mapped. The advisory RUSTSEC-2026-0186 affects
+# `memmap2 0.5.x` which osmpbf only exercises through its opt-in
+# `mmap_blob` API, never through the `ElementReader` path this crate takes.
+#
+# Remove this ignore when osmpbf bumps memmap2 to >= 0.9 (the fix landed
+# upstream; tracking the next osmpsf release).
+
+[advisories]
+ignore = ["RUSTSEC-2026-0186"]

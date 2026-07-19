@@ -18,12 +18,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
 
-      - uses: Swatinem/rust-cache@v2.9.1
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
       - name: Get version
         id: version
@@ -67,9 +69,10 @@ jobs:
 
       - name: Discord notification
         if: success() && steps.check_version.outputs.exists == 'false'
+        continue-on-error: true
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-        uses: Ilshidur/action-discord@0.4.0
-        with:
-          args: 'Published {{ EVENT_PAYLOAD.repository.name }} v${{ steps.version.outputs.version }} to crates.io!'
-        continue-on-error: true
+        run: |
+          curl -sf -H "Content-Type: application/json" \
+            -d "{\"content\": \"Published ${{ github.event.repository.name }} v${{ steps.version.outputs.version }} to crates.io!\"}" \
+            "$DISCORD_WEBHOOK"

@@ -1,9 +1,6 @@
 # Rust build artifacts
 /target/
 
-# Library crate: don't commit Cargo.lock — downstream resolves the lockfile
-Cargo.lock
-
 # macOS
 .DS_Store
 
