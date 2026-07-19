@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Released versions are published to [crates.io](https://crates.io/crates/par-osm-rust).
 
+## [Unreleased]
+
 ## [0.3.0] - 2026-07-18
 
 The 0.3.0 release consolidates six interrelated breaking changes from the
