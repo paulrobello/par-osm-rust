@@ -53,6 +53,7 @@ mod tests {
     #[cfg(feature = "blocking")]
     use super::cli::validate_cli_type;
     use super::*;
+    use crate::bbox::BBox;
     use crate::osm::FeatureSource;
     use crate::synthetic_ids::OvertureIdAllocator;
     use crate::synthetic_ids::SYNTHETIC_OVERTURE_ID_BASE;
@@ -242,8 +243,12 @@ mod tests {
         let _path_guard = prepend_to_path(tmp.path());
         let start = Instant::now();
 
-        let err = fetch_geojson_for_type("place", (51.5, -0.13, 51.52, -0.10), 5)
-            .expect_err("fake CLI should fail");
+        let err = fetch_geojson_for_type(
+            "place",
+            &BBox::from((51.5, -0.13, 51.52, -0.10)),
+            5,
+        )
+        .expect_err("fake CLI should fail");
 
         assert!(
             start.elapsed() < Duration::from_secs(2),
@@ -539,26 +544,26 @@ mod tests {
 
     #[test]
     fn overture_cache_key_is_deterministic() {
-        let bbox = (51.5, -0.13, 51.52, -0.10);
-        let k1 = overture_cache_key(bbox, "building");
-        let k2 = overture_cache_key(bbox, "building");
+        let bbox = BBox::from((51.5, -0.13, 51.52, -0.10));
+        let k1 = overture_cache_key(&bbox, "building");
+        let k2 = overture_cache_key(&bbox, "building");
         assert_eq!(k1, k2);
         assert_eq!(k1.len(), 64, "SHA-256 hex should be 64 chars");
     }
 
     #[test]
     fn overture_cache_key_varies_by_theme() {
-        let bbox = (51.5, -0.13, 51.52, -0.10);
-        let k1 = overture_cache_key(bbox, "building");
-        let k2 = overture_cache_key(bbox, "segment");
+        let bbox = BBox::from((51.5, -0.13, 51.52, -0.10));
+        let k1 = overture_cache_key(&bbox, "building");
+        let k2 = overture_cache_key(&bbox, "segment");
         assert_ne!(k1, k2);
     }
 
     #[test]
     fn overture_cache_key_with_version_is_deterministic() {
-        let bbox = (51.5, -0.13, 51.52, -0.10);
-        let k1 = overture_cache_key_with_version(bbox, "building", "0.4.0");
-        let k2 = overture_cache_key_with_version(bbox, "building", "0.4.0");
+        let bbox = BBox::from((51.5, -0.13, 51.52, -0.10));
+        let k1 = overture_cache_key_with_version(&bbox, "building", "0.4.0");
+        let k2 = overture_cache_key_with_version(&bbox, "building", "0.4.0");
         assert_eq!(k1, k2);
         assert_eq!(k1.len(), 64, "SHA-256 hex should be 64 chars");
     }
@@ -566,29 +571,29 @@ mod tests {
     #[test]
     fn overture_cache_key_with_version_varies_by_cli_version() {
         // ARC-001: a CLI upgrade must invalidate the cache.
-        let bbox = (51.5, -0.13, 51.52, -0.10);
-        let k_old = overture_cache_key_with_version(bbox, "building", "0.4.0");
-        let k_new = overture_cache_key_with_version(bbox, "building", "0.5.0");
+        let bbox = BBox::from((51.5, -0.13, 51.52, -0.10));
+        let k_old = overture_cache_key_with_version(&bbox, "building", "0.4.0");
+        let k_new = overture_cache_key_with_version(&bbox, "building", "0.5.0");
         assert_ne!(k_old, k_new);
     }
 
     #[test]
     fn overture_cache_key_with_version_differs_from_legacy_key() {
         // ARC-001: the new v2 canonical form must not collide with v1.
-        let bbox = (51.5, -0.13, 51.52, -0.10);
-        let legacy = overture_cache_key(bbox, "building");
-        let versioned = overture_cache_key_with_version(bbox, "building", "0.4.0");
+        let bbox = BBox::from((51.5, -0.13, 51.52, -0.10));
+        let legacy = overture_cache_key(&bbox, "building");
+        let versioned = overture_cache_key_with_version(&bbox, "building", "0.4.0");
         assert_ne!(legacy, versioned);
     }
 
     #[test]
     fn overture_cache_write_read_roundtrip() {
         let tmp = tempfile::tempdir().expect("tmpdir");
-        let bbox = (51.5_f64, -0.13_f64, 51.52_f64, -0.10_f64);
-        let key = overture_cache_key_with_version(bbox, "building", "test");
+        let bbox = BBox::from((51.5_f64, -0.13_f64, 51.52_f64, -0.10_f64));
+        let key = overture_cache_key_with_version(&bbox, "building", "test");
         let geojson = r#"{"type":"FeatureCollection","features":[]}"#;
 
-        overture_cache_write(tmp.path(), &key, bbox, "building", "test", geojson).unwrap();
+        overture_cache_write(tmp.path(), &key, &bbox, "building", "test", geojson).unwrap();
         // `None` disables TTL enforcement.
         let result = overture_cache_read(tmp.path(), &key, None);
         assert_eq!(result.as_deref(), Some(geojson));
@@ -598,8 +603,8 @@ mod tests {
     fn overture_cache_read_returns_none_when_ttl_exceeded() {
         // ARC-001: an entry older than the TTL is treated as a miss.
         let tmp = tempfile::tempdir().expect("tmpdir");
-        let bbox = (51.5_f64, -0.13_f64, 51.52_f64, -0.10_f64);
-        let key = overture_cache_key_with_version(bbox, "building", "test");
+        let bbox = BBox::from((51.5_f64, -0.13_f64, 51.52_f64, -0.10_f64));
+        let key = overture_cache_key_with_version(&bbox, "building", "test");
         let geojson = r#"{"type":"FeatureCollection","features":[]}"#;
 
         // Hand-write a meta file whose `created_at` is well in the past so
@@ -609,7 +614,7 @@ mod tests {
         std::fs::write(&geojson_path, geojson).unwrap();
         let past = Utc::now() - chrono::Duration::days(365);
         let meta = serde_json::json!({
-            "bbox": [bbox.0, bbox.1, bbox.2, bbox.3],
+            "bbox": [bbox.south, bbox.west, bbox.north, bbox.east],
             "cli_type": "building",
             "created_at": past,
             "size_bytes": geojson.len() as u64,
@@ -629,11 +634,11 @@ mod tests {
     fn overture_cache_read_returns_data_when_entry_is_fresh() {
         // ARC-001 counterpart: a freshly-written entry is a hit.
         let tmp = tempfile::tempdir().expect("tmpdir");
-        let bbox = (51.5_f64, -0.13_f64, 51.52_f64, -0.10_f64);
-        let key = overture_cache_key_with_version(bbox, "building", "test");
+        let bbox = BBox::from((51.5_f64, -0.13_f64, 51.52_f64, -0.10_f64));
+        let key = overture_cache_key_with_version(&bbox, "building", "test");
         let geojson = r#"{"type":"FeatureCollection","features":[]}"#;
 
-        overture_cache_write(tmp.path(), &key, bbox, "building", "test", geojson).unwrap();
+        overture_cache_write(tmp.path(), &key, &bbox, "building", "test", geojson).unwrap();
         // 30-day TTL — entry is seconds old, so this must hit.
         let result = overture_cache_read(
             tmp.path(),
@@ -649,8 +654,8 @@ mod tests {
         // we cannot enforce freshness — treat as a miss rather than serve
         // potentially stale data without a timestamp.
         let tmp = tempfile::tempdir().expect("tmpdir");
-        let bbox = (51.5_f64, -0.13_f64, 51.52_f64, -0.10_f64);
-        let key = overture_cache_key_with_version(bbox, "building", "test");
+        let bbox = BBox::from((51.5_f64, -0.13_f64, 51.52_f64, -0.10_f64));
+        let key = overture_cache_key_with_version(&bbox, "building", "test");
         let geojson_path = tmp.path().join(format!("{key}.geojson"));
         std::fs::write(
             &geojson_path,
@@ -687,8 +692,12 @@ mod tests {
     #[test]
     fn fetch_geojson_for_type_rejects_argument_injection() {
         // SEC-012: a user-controlled cli_type must not reach the CLI as a flag.
-        let err = fetch_geojson_for_type("--output=/tmp/evil", (0.0, 0.0, 1.0, 1.0), 1)
-            .expect_err("dashed cli_type must be rejected before spawn");
+        let err = fetch_geojson_for_type(
+            "--output=/tmp/evil",
+            &BBox::from((0.0, 0.0, 1.0, 1.0)),
+            1,
+        )
+        .expect_err("dashed cli_type must be rejected before spawn");
         let msg = err.to_string();
         assert!(
             msg.contains("SEC-012") || msg.contains("argument-injection"),

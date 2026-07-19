@@ -15,6 +15,8 @@ use std::collections::HashMap;
 #[cfg(feature = "blocking")]
 use anyhow::Result;
 
+#[cfg(feature = "blocking")]
+use crate::bbox::BBox;
 use crate::filter::FeatureFilter;
 use crate::osm::{FeatureSource, OsmData, OsmPoiNode, POI_TAG_KEYS};
 use crate::overture::OvertureParams;
@@ -428,16 +430,16 @@ fn emit_progress(
 
 #[cfg(feature = "blocking")]
 pub(crate) fn fetch_map_data_with_fetchers<FetchOsm, FetchOverture>(
-    bbox: (f64, f64, f64, f64),
+    bbox: &BBox,
     options: &SourceOptions,
     progress_cb: &mut dyn FnMut(f32, &str),
     mut fetch_osm: FetchOsm,
     mut fetch_overture: FetchOverture,
 ) -> Result<SourceFetchResult>
 where
-    FetchOsm: FnMut((f64, f64, f64, f64), &FeatureFilter, bool, &str) -> Result<OsmData>,
+    FetchOsm: FnMut(&BBox, &FeatureFilter, bool, &str) -> Result<OsmData>,
     FetchOverture:
-        FnMut((f64, f64, f64, f64), &OvertureParams, &mut dyn FnMut(f32, &str)) -> Result<OsmData>,
+        FnMut(&BBox, &OvertureParams, &mut dyn FnMut(f32, &str)) -> Result<OsmData>,
 {
     const OSM_DONE_PROGRESS: f32 = 0.45;
     const OVERTURE_DONE_PROGRESS: f32 = 0.90;
@@ -490,7 +492,7 @@ where
                     MERGE_PROGRESS,
                     "Merging map data…",
                 );
-                result.data.clip_to_bbox(bbox);
+                result.data.clip_to_bbox(bbox.swne());
                 emit_progress(progress_cb, &mut last_progress, 1.0, "Map data ready");
                 return Ok(result);
             }
@@ -513,7 +515,7 @@ where
         "Merging map data…",
     );
     let mut result = merge_source_data(osm_data, overture_data, options.poi_source_mode);
-    result.data.clip_to_bbox(bbox);
+    result.data.clip_to_bbox(bbox.swne());
     emit_progress(progress_cb, &mut last_progress, 1.0, "Map data ready");
     Ok(result)
 }
@@ -521,7 +523,7 @@ where
 #[cfg(feature = "blocking")]
 /// Fetch OSM/Overpass data, optionally fetch Overture data, and apply source policy.
 ///
-/// `bbox` is `(south, west, north, east)` in decimal degrees. `progress` receives
+/// `bbox` is the validated [`BBox`] newtype (ARC-106). `progress` receives
 /// monotonically increasing values in the range `0.0..=1.0` for the source fetch
 /// phase. The function uses blocking I/O and should be called from an appropriate
 /// worker thread in async/UI applications.
@@ -542,18 +544,19 @@ where
 ///
 /// ```no_run
 /// # #[cfg(feature = "blocking")] fn main() {
+/// use par_osm_rust::bbox::BBox;
 /// use par_osm_rust::sources::{fetch_map_data, SourceOptions};
 ///
-/// let bbox = (38.0, -121.0, 38.01, -120.99); // south, west, north, east
+/// let bbox = BBox::new(38.0, -121.0, 38.01, -120.99).unwrap(); // south, west, north, east
 /// let options = SourceOptions::default();
 /// let mut progress = |pct: f32, msg: &str| println!("{pct:.0}% {msg}");
-/// let result = fetch_map_data(bbox, &options, &mut progress).expect("fetch succeeds");
+/// let result = fetch_map_data(&bbox, &options, &mut progress).expect("fetch succeeds");
 /// println!("status: {:?}", result.status);
 /// # }
 /// # #[cfg(not(feature = "blocking"))] fn main() {}
 /// ```
 pub fn fetch_map_data(
-    bbox: (f64, f64, f64, f64),
+    bbox: &BBox,
     options: &SourceOptions,
     progress_cb: &mut dyn FnMut(f32, &str),
 ) -> Result<SourceFetchResult> {
@@ -618,8 +621,8 @@ mod tests {
     }
 
     #[cfg(feature = "blocking")]
-    fn test_bbox() -> (f64, f64, f64, f64) {
-        (0.0, 0.0, 1.0, 1.0)
+    fn test_bbox() -> BBox {
+        BBox::from((0.0, 0.0, 1.0, 1.0))
     }
 
     #[cfg(feature = "blocking")]
@@ -630,7 +633,7 @@ mod tests {
         let mut progress = Vec::new();
 
         let result = fetch_map_data_with_fetchers(
-            test_bbox(),
+            &test_bbox(),
             &options,
             &mut |pct, message| progress.push((pct, message.to_string())),
             |_, _, _, _| {
@@ -668,7 +671,7 @@ mod tests {
         let mut overture_called = false;
 
         let result = fetch_map_data_with_fetchers(
-            test_bbox(),
+            &test_bbox(),
             &options,
             &mut |_, _| {},
             |_, _, _, _| {
@@ -717,7 +720,7 @@ mod tests {
         options.overture_failure_mode = OvertureFailureMode::FallbackToOsm;
 
         let result = fetch_map_data_with_fetchers(
-            test_bbox(),
+            &test_bbox(),
             &options,
             &mut |_, _| {},
             |_, _, _, _| {
@@ -755,7 +758,7 @@ mod tests {
         options.overture_failure_mode = OvertureFailureMode::Fail;
 
         let err = match fetch_map_data_with_fetchers(
-            test_bbox(),
+            &test_bbox(),
             &options,
             &mut |_, _| {},
             |_, _, _, _| Ok(empty_data()),
@@ -776,7 +779,7 @@ mod tests {
         let mut progress_values = Vec::new();
 
         fetch_map_data_with_fetchers(
-            test_bbox(),
+            &test_bbox(),
             &options,
             &mut |pct, _| progress_values.push(pct),
             |_, _, _, _| Ok(empty_data()),

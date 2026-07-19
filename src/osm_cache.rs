@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use url::Url;
 
+use crate::bbox::BBox;
 use crate::cache_store::{CacheMeta as CacheMetaTrait, RawCache, to_hex};
 use crate::filter::FeatureFilter;
 
@@ -114,15 +115,14 @@ pub fn cache_dir() -> PathBuf {
     since = "0.2.0",
     note = "use the URL-aware `cache_key_for_url` instead; legacy keys do not isolate by Overpass endpoint"
 )]
-pub fn cache_key(bbox: (f64, f64, f64, f64), filter: &FeatureFilter) -> String {
-    let (s, w, n, e) = bbox;
+pub fn cache_key(bbox: &BBox, filter: &FeatureFilter) -> String {
     let canonical = format!(
         "v{}|{:.4},{:.4},{:.4},{:.4}|roads={},buildings={},water={},landuse={},railways={}",
         CACHE_SCHEMA_VERSION,
-        s,
-        w,
-        n,
-        e,
+        bbox.south,
+        bbox.west,
+        bbox.north,
+        bbox.east,
         u8::from(filter.roads),
         u8::from(filter.buildings),
         u8::from(filter.water),
@@ -142,18 +142,17 @@ pub fn cache_key(bbox: (f64, f64, f64, f64), filter: &FeatureFilter) -> String {
 /// from [`cache_key`] so endpoint-specific entries cannot collide with legacy
 /// bbox/filter-only entries.
 pub fn cache_key_for_url(
-    bbox: (f64, f64, f64, f64),
+    bbox: &BBox,
     filter: &FeatureFilter,
     overpass_url: &str,
 ) -> String {
-    let (s, w, n, e) = bbox;
     let source = canonical_overpass_url(overpass_url);
     let canonical = format!(
         "{URL_AWARE_CACHE_PREFIX}-v{URL_AWARE_CACHE_SCHEMA_VERSION}|{source}|{:.4},{:.4},{:.4},{:.4}|roads={},buildings={},water={},landuse={},railways={}",
-        s,
-        w,
-        n,
-        e,
+        bbox.south,
+        bbox.west,
+        bbox.north,
+        bbox.east,
         u8::from(filter.roads),
         u8::from(filter.buildings),
         u8::from(filter.water),
@@ -233,7 +232,7 @@ pub fn read_for_url(key: &str, overpass_url: &str) -> Option<String> {
 )]
 pub fn write(
     key: &str,
-    bbox: (f64, f64, f64, f64),
+    bbox: &BBox,
     filter: &FeatureFilter,
     xml: &str,
 ) -> Result<()> {
@@ -251,7 +250,7 @@ pub fn write(
 /// fails, or if any I/O step in the atomic write-then-rename protocol fails.
 pub fn write_for_url(
     key: &str,
-    bbox: (f64, f64, f64, f64),
+    bbox: &BBox,
     filter: &FeatureFilter,
     xml: &str,
     overpass_url: &str,
@@ -298,7 +297,7 @@ fn read_from_for_url(dir: &std::path::Path, key: &str, overpass_url: &str) -> Op
 fn write_to(
     dir: &std::path::Path,
     key: &str,
-    bbox: (f64, f64, f64, f64),
+    bbox: &BBox,
     filter: &FeatureFilter,
     xml: &str,
 ) -> Result<()> {
@@ -308,7 +307,7 @@ fn write_to(
 fn write_to_for_url(
     dir: &std::path::Path,
     key: &str,
-    bbox: (f64, f64, f64, f64),
+    bbox: &BBox,
     filter: &FeatureFilter,
     xml: &str,
     overpass_url: &str,
@@ -320,15 +319,17 @@ fn write_to_for_url(
 fn write_to_with_overpass_url(
     dir: &std::path::Path,
     key: &str,
-    bbox: (f64, f64, f64, f64),
+    bbox: &BBox,
     filter: &FeatureFilter,
     xml: &str,
     overpass_url: Option<String>,
 ) -> Result<()> {
-    let (s, w, n, e) = bbox;
+    // ARC-106: the on-disk meta keeps the `[f64; 4]` SWNE wire format
+    // unchanged; the `BBox` newtype is converted at the boundary so existing
+    // cache entries remain readable.
     let size_bytes = xml.len() as u64;
     let meta = CacheMeta {
-        bbox: [s, w, n, e],
+        bbox: [bbox.south, bbox.west, bbox.north, bbox.east],
         filter: filter.clone(),
         created_at: Utc::now(),
         size_bytes,
@@ -393,14 +394,14 @@ fn list_metas_in(dir: &std::path::Path) -> Vec<(String, CacheMeta)> {
     since = "0.2.0",
     note = "use the URL-aware `find_containing_for_url` instead; legacy lookups do not isolate by Overpass endpoint"
 )]
-pub fn find_containing(bbox: (f64, f64, f64, f64), filter: &FeatureFilter) -> Option<String> {
+pub fn find_containing(bbox: &BBox, filter: &FeatureFilter) -> Option<String> {
     find_containing_in(&cache_dir(), bbox, filter)
 }
 
 /// Return cached XML for a containing entry only when its metadata matches
 /// `overpass_url`.
 pub fn find_containing_for_url(
-    bbox: (f64, f64, f64, f64),
+    bbox: &BBox,
     filter: &FeatureFilter,
     overpass_url: &str,
 ) -> Option<String> {
@@ -409,13 +410,12 @@ pub fn find_containing_for_url(
 
 fn find_containing_in(
     dir: &std::path::Path,
-    bbox: (f64, f64, f64, f64),
+    bbox: &BBox,
     filter: &FeatureFilter,
 ) -> Option<String> {
-    let (req_s, req_w, req_n, req_e) = bbox;
     for entry in list_areas_in(dir) {
         let [cs, cw, cn, ce] = entry.bbox;
-        let contained = cs <= req_s && cw <= req_w && cn >= req_n && ce >= req_e;
+        let contained = cs <= bbox.south && cw <= bbox.west && cn >= bbox.north && ce >= bbox.east;
         let filter_matches = entry.filter == *filter;
         if contained && filter_matches {
             return read_from(dir, &entry.key);
@@ -426,7 +426,7 @@ fn find_containing_in(
 
 fn find_containing_in_for_url(
     dir: &std::path::Path,
-    bbox: (f64, f64, f64, f64),
+    bbox: &BBox,
     filter: &FeatureFilter,
     overpass_url: &str,
 ) -> Option<String> {
@@ -437,10 +437,9 @@ fn find_containing_in_for_url(
     // meta file via `meta_matches_overpass_url` — doubling the metadata I/O
     // per lookup. The data file is still read exactly once for the match.
     let source = canonical_overpass_url(overpass_url);
-    let (req_s, req_w, req_n, req_e) = bbox;
     for (key, meta) in list_metas_in(dir) {
         let [cs, cw, cn, ce] = meta.bbox;
-        let contained = cs <= req_s && cw <= req_w && cn >= req_n && ce >= req_e;
+        let contained = cs <= bbox.south && cw <= bbox.west && cn >= bbox.north && ce >= bbox.east;
         let filter_matches = meta.filter == *filter;
         let source_matches = meta.overpass_url.as_deref() == Some(source.as_str());
         if contained && filter_matches && source_matches {
@@ -496,9 +495,9 @@ mod tests {
 
     #[test]
     fn cache_key_is_deterministic() {
-        let bbox = (51.5, -0.13, 51.52, -0.10);
-        let k1 = cache_key(bbox, &all_on());
-        let k2 = cache_key(bbox, &all_on());
+        let bbox = BBox::from((51.5, -0.13, 51.52, -0.10));
+        let k1 = cache_key(&bbox, &all_on());
+        let k2 = cache_key(&bbox, &all_on());
         assert_eq!(k1, k2);
         assert_eq!(k1.len(), 64, "SHA-256 hex should be 64 chars");
     }
@@ -506,26 +505,26 @@ mod tests {
     #[test]
     fn cache_key_snaps_coordinates() {
         // Differ by < 0.00005° (half of 0.0001°) → same key
-        let bbox1 = (51.50001, -0.13000, 51.52001, -0.10000);
-        let bbox2 = (51.50002, -0.13002, 51.52002, -0.10001);
-        assert_eq!(cache_key(bbox1, &all_on()), cache_key(bbox2, &all_on()));
+        let bbox1 = BBox::from((51.50001, -0.13000, 51.52001, -0.10000));
+        let bbox2 = BBox::from((51.50002, -0.13002, 51.52002, -0.10001));
+        assert_eq!(cache_key(&bbox1, &all_on()), cache_key(&bbox2, &all_on()));
     }
 
     #[test]
     fn cache_key_varies_by_filter() {
-        let bbox = (51.5, -0.13, 51.52, -0.10);
-        let all_key = cache_key(bbox, &all_on());
-        let roads_key = cache_key(bbox, &roads_only());
+        let bbox = BBox::from((51.5, -0.13, 51.52, -0.10));
+        let all_key = cache_key(&bbox, &all_on());
+        let roads_key = cache_key(&bbox, &roads_only());
         assert_ne!(all_key, roads_key);
     }
 
     #[test]
     fn cache_key_for_url_varies_by_overpass_url() {
-        let bbox = (51.5, -0.13, 51.52, -0.10);
+        let bbox = BBox::from((51.5, -0.13, 51.52, -0.10));
         let default_key =
-            cache_key_for_url(bbox, &all_on(), "https://overpass-api.de/api/interpreter");
+            cache_key_for_url(&bbox, &all_on(), "https://overpass-api.de/api/interpreter");
         let mirror_key = cache_key_for_url(
-            bbox,
+            &bbox,
             &all_on(),
             "https://overpass.kumi.systems/api/interpreter",
         );
@@ -534,27 +533,27 @@ mod tests {
 
     #[test]
     fn cache_key_for_url_is_deterministic_for_default_url() {
-        let bbox = (51.5, -0.13, 51.52, -0.10);
-        let k1 = cache_key_for_url(bbox, &all_on(), "https://overpass-api.de/api/interpreter");
+        let bbox = BBox::from((51.5, -0.13, 51.52, -0.10));
+        let k1 = cache_key_for_url(&bbox, &all_on(), "https://overpass-api.de/api/interpreter");
         let k2 = cache_key_for_url(
-            bbox,
+            &bbox,
             &all_on(),
             " https://overpass-api.de:443/api/interpreter#ignored ",
         );
         assert_eq!(k1, k2);
-        assert_ne!(k1, cache_key(bbox, &all_on()));
+        assert_ne!(k1, cache_key(&bbox, &all_on()));
     }
 
     #[test]
     fn write_for_url_then_read_for_other_url_returns_none() {
         let tmp = with_cache_dir();
-        let bbox = (51.5_f64, -0.13_f64, 51.52_f64, -0.10_f64);
+        let bbox = BBox::from((51.5_f64, -0.13_f64, 51.52_f64, -0.10_f64));
         let default_url = "https://overpass-api.de/api/interpreter";
         let mirror_url = "https://overpass.kumi.systems/api/interpreter";
-        let key = cache_key_for_url(bbox, &all_on(), default_url);
+        let key = cache_key_for_url(&bbox, &all_on(), default_url);
         let xml = "<osm><node id='1'/></osm>";
 
-        write_to_for_url(tmp.path(), &key, bbox, &all_on(), xml, default_url).unwrap();
+        write_to_for_url(tmp.path(), &key, &bbox, &all_on(), xml, default_url).unwrap();
 
         assert_eq!(
             read_from_for_url(tmp.path(), &key, default_url).as_deref(),
@@ -566,21 +565,21 @@ mod tests {
     #[test]
     fn find_containing_for_url_ignores_other_overpass_url() {
         let tmp = with_cache_dir();
-        let large_bbox = (51.5_f64, -0.13_f64, 51.52_f64, -0.10_f64);
-        let small_bbox = (51.505, -0.125, 51.515, -0.105);
+        let large_bbox = BBox::from((51.5_f64, -0.13_f64, 51.52_f64, -0.10_f64));
+        let small_bbox = BBox::from((51.505, -0.125, 51.515, -0.105));
         let default_url = "https://overpass-api.de/api/interpreter";
         let mirror_url = "https://overpass.kumi.systems/api/interpreter";
-        let key = cache_key_for_url(large_bbox, &all_on(), default_url);
+        let key = cache_key_for_url(&large_bbox, &all_on(), default_url);
         let xml = "<osm><node id='1'/></osm>";
 
-        write_to_for_url(tmp.path(), &key, large_bbox, &all_on(), xml, default_url).unwrap();
+        write_to_for_url(tmp.path(), &key, &large_bbox, &all_on(), xml, default_url).unwrap();
 
         assert_eq!(
-            find_containing_in_for_url(tmp.path(), small_bbox, &all_on(), default_url).as_deref(),
+            find_containing_in_for_url(tmp.path(), &small_bbox, &all_on(), default_url).as_deref(),
             Some(xml)
         );
         assert!(
-            find_containing_in_for_url(tmp.path(), small_bbox, &all_on(), mirror_url).is_none()
+            find_containing_in_for_url(tmp.path(), &small_bbox, &all_on(), mirror_url).is_none()
         );
     }
 
@@ -589,9 +588,9 @@ mod tests {
         let tmp = with_cache_dir();
         let key = "testkey123";
         let xml = "<osm><node id='1'/></osm>";
-        let bbox = (51.5_f64, -0.13_f64, 51.52_f64, -0.10_f64);
+        let bbox = BBox::from((51.5_f64, -0.13_f64, 51.52_f64, -0.10_f64));
 
-        write_to(tmp.path(), key, bbox, &FeatureFilter::default(), xml).unwrap();
+        write_to(tmp.path(), key, &bbox, &FeatureFilter::default(), xml).unwrap();
         let got = read_from(tmp.path(), key);
         assert_eq!(got.as_deref(), Some(xml));
     }
@@ -600,10 +599,11 @@ mod tests {
     fn clear_all_removes_both_files() {
         let tmp = with_cache_dir();
         let key = "aabbcc";
+        let bbox = BBox::from((51.5, -0.13, 51.52, -0.10));
         write_to(
             tmp.path(),
             key,
-            (51.5, -0.13, 51.52, -0.10),
+            &bbox,
             &FeatureFilter::default(),
             "<osm/>",
         )
@@ -634,46 +634,47 @@ mod tests {
     #[test]
     fn find_containing_returns_none_when_empty() {
         let tmp = with_cache_dir();
-        let result = find_containing_in(tmp.path(), (51.51, -0.12, 51.515, -0.11), &all_on());
+        let bbox = BBox::from((51.51, -0.12, 51.515, -0.11));
+        let result = find_containing_in(tmp.path(), &bbox, &all_on());
         assert!(result.is_none());
     }
 
     #[test]
     fn find_containing_returns_xml_when_bbox_contained() {
         let tmp = with_cache_dir();
-        let large_bbox = (51.5_f64, -0.13_f64, 51.52_f64, -0.10_f64);
-        let key = cache_key(large_bbox, &all_on());
+        let large_bbox = BBox::from((51.5_f64, -0.13_f64, 51.52_f64, -0.10_f64));
+        let key = cache_key(&large_bbox, &all_on());
         let xml = "<osm><node id='1'/></osm>";
-        write_to(tmp.path(), &key, large_bbox, &all_on(), xml).unwrap();
+        write_to(tmp.path(), &key, &large_bbox, &all_on(), xml).unwrap();
 
         // Sub-area fully inside the large bbox
-        let small_bbox = (51.505, -0.125, 51.515, -0.105);
-        let result = find_containing_in(tmp.path(), small_bbox, &all_on());
+        let small_bbox = BBox::from((51.505, -0.125, 51.515, -0.105));
+        let result = find_containing_in(tmp.path(), &small_bbox, &all_on());
         assert_eq!(result.as_deref(), Some(xml));
     }
 
     #[test]
     fn find_containing_returns_none_when_not_contained() {
         let tmp = with_cache_dir();
-        let cached_bbox = (51.5_f64, -0.13_f64, 51.52_f64, -0.10_f64);
-        let key = cache_key(cached_bbox, &all_on());
-        write_to(tmp.path(), &key, cached_bbox, &all_on(), "<osm/>").unwrap();
+        let cached_bbox = BBox::from((51.5_f64, -0.13_f64, 51.52_f64, -0.10_f64));
+        let key = cache_key(&cached_bbox, &all_on());
+        write_to(tmp.path(), &key, &cached_bbox, &all_on(), "<osm/>").unwrap();
 
         // Requested bbox extends outside the cached one
-        let outside_bbox = (51.49, -0.13, 51.52, -0.10);
-        let result = find_containing_in(tmp.path(), outside_bbox, &all_on());
+        let outside_bbox = BBox::from((51.49, -0.13, 51.52, -0.10));
+        let result = find_containing_in(tmp.path(), &outside_bbox, &all_on());
         assert!(result.is_none());
     }
 
     #[test]
     fn find_containing_returns_none_on_filter_mismatch() {
         let tmp = with_cache_dir();
-        let bbox = (51.5_f64, -0.13_f64, 51.52_f64, -0.10_f64);
-        let key = cache_key(bbox, &all_on());
-        write_to(tmp.path(), &key, bbox, &all_on(), "<osm/>").unwrap();
+        let bbox = BBox::from((51.5_f64, -0.13_f64, 51.52_f64, -0.10_f64));
+        let key = cache_key(&bbox, &all_on());
+        write_to(tmp.path(), &key, &bbox, &all_on(), "<osm/>").unwrap();
 
-        let small_bbox = (51.505, -0.125, 51.515, -0.105);
-        let result = find_containing_in(tmp.path(), small_bbox, &roads_only());
+        let small_bbox = BBox::from((51.505, -0.125, 51.515, -0.105));
+        let result = find_containing_in(tmp.path(), &small_bbox, &roads_only());
         assert!(result.is_none()); // filter mismatch → None
     }
 

@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use crate::bbox::BBox;
 use crate::cache_store::{CacheMeta as CacheMetaTrait, RawCache, to_hex};
 
 // ARC-102: `ThemePriority` is deprecated (never implemented; will be
@@ -205,9 +206,11 @@ pub fn overture_cache_dir() -> PathBuf {
 ///
 /// Coordinates are snapped to 4 decimal places (~11 m) so small UI drags
 /// reuse the same entry.
-pub fn overture_cache_key(bbox: (f64, f64, f64, f64), cli_type: &str) -> String {
-    let (s, w, n, e) = bbox;
-    let canonical = format!("overture|{s:.4},{w:.4},{n:.4},{e:.4}|{cli_type}");
+pub fn overture_cache_key(bbox: &BBox, cli_type: &str) -> String {
+    let canonical = format!(
+        "overture|{:.4},{:.4},{:.4},{:.4}|{cli_type}",
+        bbox.south, bbox.west, bbox.north, bbox.east
+    );
     let hash = Sha256::digest(canonical.as_bytes());
     to_hex(&hash)
 }
@@ -223,17 +226,19 @@ pub fn overture_cache_key(bbox: (f64, f64, f64, f64), cli_type: &str) -> String 
 /// distinct from the v1 form, so any pre-existing v1 entries simply miss
 /// (re-fetch) on first read after the upgrade — accepted per ARC-001.
 pub fn overture_cache_key_with_version(
-    bbox: (f64, f64, f64, f64),
+    bbox: &BBox,
     cli_type: &str,
     cli_version: &str,
 ) -> String {
-    let (s, w, n, e) = bbox;
     let version = if cli_version.is_empty() {
         "unknown"
     } else {
         cli_version
     };
-    let canonical = format!("overture|v2|{version}|{s:.4},{w:.4},{n:.4},{e:.4}|{cli_type}");
+    let canonical = format!(
+        "overture|v2|{version}|{:.4},{:.4},{:.4},{:.4}|{cli_type}",
+        bbox.south, bbox.west, bbox.north, bbox.east
+    );
     let hash = Sha256::digest(canonical.as_bytes());
     to_hex(&hash)
 }
@@ -308,15 +313,17 @@ pub fn overture_cache_read(dir: &Path, key: &str, ttl: Option<Duration>) -> Opti
 pub fn overture_cache_write(
     dir: &Path,
     key: &str,
-    bbox: (f64, f64, f64, f64),
+    bbox: &BBox,
     cli_type: &str,
     cli_version: &str,
     geojson: &str,
 ) -> Result<()> {
-    let (s, w, n, e) = bbox;
+    // ARC-106: on-disk meta keeps the `[f64; 4]` SWNE wire format unchanged;
+    // the `BBox` newtype is converted at the boundary so existing entries
+    // remain readable.
     let size_bytes = geojson.len() as u64;
     let meta = OvertureCacheMeta {
-        bbox: [s, w, n, e],
+        bbox: [bbox.south, bbox.west, bbox.north, bbox.east],
         cli_type: cli_type.to_string(),
         created_at: Utc::now(),
         size_bytes,

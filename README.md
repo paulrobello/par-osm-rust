@@ -68,6 +68,7 @@ par-osm-rust = { version = "0.2", default-features = false }
 Use `sources::fetch_map_data` when an application wants the shared OSM/Overture source policy instead of manually fetching each source.
 
 ```rust,no_run
+use par_osm_rust::bbox::BBox;
 use par_osm_rust::filter::FeatureFilter;
 use par_osm_rust::overture::{OvertureParams, OvertureTheme};
 use par_osm_rust::sources::{
@@ -75,7 +76,7 @@ use par_osm_rust::sources::{
 };
 
 fn main() -> anyhow::Result<()> {
-    let bbox = (38.0, -121.0, 38.01, -120.99); // south, west, north, east
+    let bbox = BBox::new(38.0, -121.0, 38.01, -120.99)?; // south, west, north, east
 
     let options = SourceOptions {
         filter: FeatureFilter::default(),
@@ -90,7 +91,7 @@ fn main() -> anyhow::Result<()> {
         overture_failure_mode: OvertureFailureMode::FallbackToOsm,
     };
     let mut progress = |_: f32, _: &str| {};
-    let result = fetch_map_data(bbox, &options, &mut progress)?;
+    let result = fetch_map_data(&bbox, &options, &mut progress)?;
 
     println!("status: {:?}", result.status);
     println!("pois: {}", result.data.poi_nodes().len());
@@ -105,12 +106,13 @@ fn main() -> anyhow::Result<()> {
 If you only need OSM/Overpass data, use `overpass::fetch_osm_data` directly:
 
 ```rust,no_run
+use par_osm_rust::bbox::BBox;
 use par_osm_rust::{filter::FeatureFilter, overpass};
 
 fn main() -> anyhow::Result<()> {
-    let bbox = (38.0, -121.0, 38.01, -120.99);
+    let bbox = BBox::new(38.0, -121.0, 38.01, -120.99)?;
     let url = overpass::default_overpass_url();
-    let data = overpass::fetch_osm_data(bbox, &FeatureFilter::default(), true, &url)?;
+    let data = overpass::fetch_osm_data(&bbox, &FeatureFilter::default(), true, &url)?;
     println!("ways: {}", data.iter_ways().count());
     Ok(())
 }
@@ -298,15 +300,12 @@ fn load_extract(path: &str) -> anyhow::Result<osm::OsmData> {
 `srtm` resolves and downloads HGT tiles for a bounding box; `elevation::ElevationData` samples elevations from already-downloaded tiles. The two modules are intentionally independent — callers decide whether terrain is required for their workload.
 
 ```rust,no_run
-use par_osm_rust::{elevation::ElevationData, srtm};
+use par_osm_rust::{bbox::BBox, elevation::ElevationData, srtm};
 
 fn main() -> anyhow::Result<()> {
-    let bbox = (38.0, -121.0, 38.01, -120.99); // south, west, north, east
+    let bbox = BBox::new(38.0, -121.0, 38.01, -120.99)?; // south, west, north, east
     srtm::download_tiles_for_bbox(
-        bbox.0,
-        bbox.1,
-        bbox.2,
-        bbox.3,
+        &bbox,
         &srtm::cache_dir(),
         &|_, _, _| {},
     )?;

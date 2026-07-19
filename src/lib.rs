@@ -14,13 +14,14 @@
 //!
 //! ```no_run
 //! # #[cfg(feature = "blocking")] fn main() -> anyhow::Result<()> {
+//! use par_osm_rust::bbox::BBox;
 //! use par_osm_rust::filter::FeatureFilter;
 //! use par_osm_rust::overture::{OvertureParams, OvertureTheme};
 //! use par_osm_rust::sources::{
 //!     fetch_map_data, OvertureFailureMode, PoiSourceMode, SourceOptions,
 //! };
 //!
-//! let bbox = (38.0, -121.0, 38.01, -120.99); // south, west, north, east
+//! let bbox = BBox::new(38.0, -121.0, 38.01, -120.99)?; // south, west, north, east
 //! let options = SourceOptions {
 //!     filter: FeatureFilter::default(),
 //!     overpass_url: None,
@@ -34,7 +35,7 @@
 //!     overture_failure_mode: OvertureFailureMode::FallbackToOsm,
 //! };
 //! let mut progress = |_: f32, _: &str| {};
-//! let result = fetch_map_data(bbox, &options, &mut progress)?;
+//! let result = fetch_map_data(&bbox, &options, &mut progress)?;
 //! println!("source status: {:?}", result.status);
 //! # Ok(())
 //! # }
@@ -80,12 +81,13 @@
 #[doc = include_str!("../README.md")]
 pub struct ReadmeDoctests;
 
-// SEC-104: shared bbox-validation helper used by `overpass` and `srtm`
-// (both blocking-only). Feature-gated to `blocking` so the pure
-// --no-default-features build does not emit a dead-code warning for the
-// otherwise-unused helper (its only callers are blocking-gated modules).
-#[cfg(feature = "blocking")]
-pub(crate) mod bbox;
+// ARC-106: `bbox` is now `pub` and compiles under both `--all-features` and
+// `--no-default-features` because the `BBox` newtype is consumed by pure
+// modules (`osm_cache`, `overture::cache`) in addition to the blocking-gated
+// fetchers. Previously `pub(crate)` and `#[cfg(feature = "blocking")]` (the
+// internal helper was used only by blocking modules); the public `BBox`
+// boundary type broadens the dependency surface.
+pub mod bbox;
 pub mod cache;
 pub mod cache_store;
 pub mod elevation;

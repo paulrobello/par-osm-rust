@@ -14,6 +14,8 @@ use anyhow::Result;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+use crate::bbox::BBox;
+
 const BASE_URL: &str = "https://s3.amazonaws.com/elevation-tiles-prod/skadi";
 
 /// Hard cap on the number of 1°×1° SRTM tiles a single `tiles_for_bbox` call
@@ -33,36 +35,29 @@ pub fn cache_dir() -> PathBuf {
 
 // ── Tile utilities ─────────────────────────────────────────────────────────
 
-/// Return all 1°×1° tile SW corners needed to cover (`south`, `west`) –
-/// (`north`, `east`).
+/// Return all 1°×1° tile SW corners needed to cover the input [`BBox`].
 ///
-/// Each entry is `(lat_sw, lon_sw)` as signed integer degrees. The arguments
-/// are `(min_lat, min_lon, max_lat, max_lon)` = `(south, west, north, east)`.
+/// Each entry is `(lat_sw, lon_sw)` as signed integer degrees.
 ///
 /// # Errors
 ///
-/// Returns `Err` if any coordinate is non-finite (NaN/±∞), outside the legal
-/// ranges `[-90, 90]` (lat) / `[-180, 180]` (lon), if `min_lat >= max_lat` or
-/// `min_lon >= max_lon`, or if the resulting tile count exceeds
-/// [`MAX_SRTM_TILES`] (SEC-102). Returning `Err` (rather than silently
-/// clamping) is deliberate: clamping a wild bbox would download the wrong
-/// tiles.
-pub fn tiles_for_bbox(
-    min_lat: f64,
-    min_lon: f64,
-    max_lat: f64,
-    max_lon: f64,
-) -> Result<Vec<(i32, i32)>> {
+/// Returns `Err` if the bbox fails validation (non-finite coordinate,
+/// out-of-range latitude/longitude, inverted bounds) or if the resulting tile
+/// count exceeds [`MAX_SRTM_TILES`] (SEC-102). Returning `Err` (rather than
+/// silently clamping) is deliberate: clamping a wild bbox would download the
+/// wrong tiles. ARC-106: bbox is the validated [`BBox`] newtype.
+pub fn tiles_for_bbox(bbox: &BBox) -> Result<Vec<(i32, i32)>> {
     // SEC-102 / SEC-104: validate before any `as i32` cast — saturating casts
     // turn `1e10` into `i32::MAX`, so an unguarded wild bbox yields a loop of
-    // up to ~2^64 iterations pushing tile pairs until OOM. Argument order is
-    // `(min_lat, min_lon, max_lat, max_lon)` = `(south, west, north, east)`.
-    crate::bbox::validate_bbox(min_lat, min_lon, max_lat, max_lon)?;
+    // up to ~2^64 iterations pushing tile pairs until OOM. ARC-106: bbox
+    // arrives as the validated `BBox` newtype; validation runs once at
+    // construction and is re-checked here as defense-in-depth.
+    crate::bbox::validate_bbox(bbox.south, bbox.west, bbox.north, bbox.east)?;
 
-    let lat0 = min_lat.floor() as i32;
-    let lat1 = max_lat.ceil() as i32;
-    let lon0 = min_lon.floor() as i32;
-    let lon1 = max_lon.ceil() as i32;
+    let lat0 = bbox.south.floor() as i32;
+    let lat1 = bbox.north.ceil() as i32;
+    let lon0 = bbox.west.floor() as i32;
+    let lon1 = bbox.east.ceil() as i32;
 
     let mut tiles = Vec::new();
     for lat in lat0..lat1 {
@@ -73,8 +68,12 @@ pub fn tiles_for_bbox(
 
     if tiles.len() > MAX_SRTM_TILES {
         anyhow::bail!(
-            "bbox ({min_lat}, {min_lon}, {max_lat}, {max_lon}) expands to {} SRTM tiles, \
+            "bbox ({}, {}, {}, {}) expands to {} SRTM tiles, \
              exceeding the {MAX_SRTM_TILES}-tile cap",
+            bbox.south,
+            bbox.west,
+            bbox.north,
+            bbox.east,
             tiles.len()
         );
     }
@@ -322,14 +321,11 @@ fn download_tile_with_retry(lat: i32, lon: i32, dest_dir: &Path, max_retries: u3
 ///
 /// Returns the number of tiles actually downloaded (excludes pre-existing ones).
 pub fn download_tiles_for_bbox(
-    min_lat: f64,
-    min_lon: f64,
-    max_lat: f64,
-    max_lon: f64,
+    bbox: &BBox,
     dest_dir: &Path,
     progress_cb: &dyn Fn(usize, usize, &str),
 ) -> Result<usize> {
-    let tiles = tiles_for_bbox(min_lat, min_lon, max_lat, max_lon)?;
+    let tiles = tiles_for_bbox(bbox)?;
     let total = tiles.len();
 
     if total == 0 {
@@ -392,7 +388,7 @@ mod tests {
     #[test]
     fn tiles_for_bbox_single_tile() {
         // A small bbox well within one degree cell
-        let tiles = tiles_for_bbox(48.1, -122.9, 48.8, -122.1).expect("valid bbox");
+        let tiles = tiles_for_bbox(&BBox::from((48.1, -122.9, 48.8, -122.1))).expect("valid bbox");
         assert_eq!(tiles.len(), 1);
         assert!(tiles.contains(&(48, -123)));
     }
@@ -400,7 +396,7 @@ mod tests {
     #[test]
     fn tiles_for_bbox_two_columns() {
         // Spans the lon=-123 boundary
-        let tiles = tiles_for_bbox(48.1, -123.5, 48.8, -122.5).expect("valid bbox");
+        let tiles = tiles_for_bbox(&BBox::from((48.1, -123.5, 48.8, -122.5))).expect("valid bbox");
         assert_eq!(tiles.len(), 2);
         assert!(tiles.contains(&(48, -124)));
         assert!(tiles.contains(&(48, -123)));
@@ -409,7 +405,7 @@ mod tests {
     #[test]
     fn tiles_for_bbox_four_tiles() {
         // Spans both a lat and a lon boundary
-        let tiles = tiles_for_bbox(47.5, -123.5, 48.5, -122.5).expect("valid bbox");
+        let tiles = tiles_for_bbox(&BBox::from((47.5, -123.5, 48.5, -122.5))).expect("valid bbox");
         assert_eq!(tiles.len(), 4);
     }
 
@@ -419,7 +415,7 @@ mod tests {
         // validation rejects `min >= max`, so the degenerate case now returns
         // Err. Confirm the validator rejects it rather than producing an
         // empty Vec silently.
-        let result = tiles_for_bbox(0.0, 0.0, 0.0, 0.0);
+        let result = tiles_for_bbox(&BBox::from_unchecked(0.0, 0.0, 0.0, 0.0));
         assert!(
             result.is_err(),
             "degenerate equal-bound bbox must error, got {result:?}"
@@ -432,54 +428,58 @@ mod tests {
     fn tiles_for_bbox_rejects_nan_in_any_position() {
         // NaN comparisons are false, so without an explicit is_finite() check
         // the floor/ceil casts would happily produce garbage tile ranges.
-        assert!(tiles_for_bbox(f64::NAN, 0.0, 1.0, 1.0).is_err());
-        assert!(tiles_for_bbox(0.0, f64::NAN, 1.0, 1.0).is_err());
-        assert!(tiles_for_bbox(0.0, 0.0, f64::NAN, 1.0).is_err());
-        assert!(tiles_for_bbox(0.0, 0.0, 1.0, f64::NAN).is_err());
+        // ARC-106: invalid bboxes must be built via `from_unchecked` because
+        // `BBox::new` would reject them at construction time.
+        assert!(tiles_for_bbox(&BBox::from_unchecked(f64::NAN, 0.0, 1.0, 1.0)).is_err());
+        assert!(tiles_for_bbox(&BBox::from_unchecked(0.0, f64::NAN, 1.0, 1.0)).is_err());
+        assert!(tiles_for_bbox(&BBox::from_unchecked(0.0, 0.0, f64::NAN, 1.0)).is_err());
+        assert!(tiles_for_bbox(&BBox::from_unchecked(0.0, 0.0, 1.0, f64::NAN)).is_err());
     }
 
     #[test]
     fn tiles_for_bbox_rejects_infinity() {
-        assert!(tiles_for_bbox(f64::INFINITY, 0.0, 1.0, 1.0).is_err());
-        assert!(tiles_for_bbox(0.0, 0.0, 1.0, f64::NEG_INFINITY).is_err());
+        assert!(tiles_for_bbox(&BBox::from_unchecked(f64::INFINITY, 0.0, 1.0, 1.0)).is_err());
+        assert!(tiles_for_bbox(&BBox::from_unchecked(0.0, 0.0, 1.0, f64::NEG_INFINITY)).is_err());
     }
 
     #[test]
     fn tiles_for_bbox_rejects_out_of_range_latitude() {
         // ±91 must be rejected; the legal range is [-90, 90].
-        assert!(tiles_for_bbox(-91.0, 0.0, 10.0, 10.0).is_err());
-        assert!(tiles_for_bbox(0.0, 0.0, 91.0, 10.0).is_err());
+        assert!(tiles_for_bbox(&BBox::from_unchecked(-91.0, 0.0, 10.0, 10.0)).is_err());
+        assert!(tiles_for_bbox(&BBox::from_unchecked(0.0, 0.0, 91.0, 10.0)).is_err());
         // Boundary values ±90 are accepted — use a tiny bbox so the tile
         // count stays well under MAX_SRTM_TILES.
-        tiles_for_bbox(-90.0, 0.0, -89.5, 0.5).expect("-90 latitude boundary accepted");
-        tiles_for_bbox(89.5, 0.0, 90.0, 0.5).expect("+90 latitude boundary accepted");
+        tiles_for_bbox(&BBox::new(-90.0, 0.0, -89.5, 0.5).unwrap())
+            .expect("-90 latitude boundary accepted");
+        tiles_for_bbox(&BBox::new(89.5, 0.0, 90.0, 0.5).unwrap())
+            .expect("+90 latitude boundary accepted");
     }
 
     #[test]
     fn tiles_for_bbox_rejects_out_of_range_longitude() {
         // ±181 must be rejected; the legal range is [-180, 180].
-        assert!(tiles_for_bbox(0.0, -181.0, 10.0, 10.0).is_err());
-        assert!(tiles_for_bbox(0.0, 0.0, 10.0, 181.0).is_err());
+        assert!(tiles_for_bbox(&BBox::from_unchecked(0.0, -181.0, 10.0, 10.0)).is_err());
+        assert!(tiles_for_bbox(&BBox::from_unchecked(0.0, 0.0, 10.0, 181.0)).is_err());
     }
 
     #[test]
     fn tiles_for_bbox_rejects_inverted_bounds() {
         // min_lat >= max_lat or min_lon >= max_lon is caller error.
-        assert!(tiles_for_bbox(10.0, 0.0, 0.0, 10.0).is_err());
-        assert!(tiles_for_bbox(0.0, 10.0, 10.0, 0.0).is_err());
+        assert!(tiles_for_bbox(&BBox::from_unchecked(10.0, 0.0, 0.0, 10.0)).is_err());
+        assert!(tiles_for_bbox(&BBox::from_unchecked(0.0, 10.0, 10.0, 0.0)).is_err());
     }
 
     #[test]
     fn tiles_for_bbox_enforces_tile_count_cap() {
         // Just under the cap: full-globe latitude span × a tight longitude
         // span. Realistic-sized bboxes never approach the cap.
-        let near = tiles_for_bbox(-89.5, 0.0, 89.5, 0.5).expect("near-cap bbox");
+        let near = tiles_for_bbox(&BBox::from((-89.5, 0.0, 89.5, 0.5))).expect("near-cap bbox");
         assert!(near.len() <= MAX_SRTM_TILES);
 
         // Over the cap: a bbox deliberately sized to exceed MAX_SRTM_TILES.
         // MAX_SRTM_TILES = 1000; an 1800-tile span (60 lat × 30 lon) is
         // well over.
-        let over = tiles_for_bbox(-30.0, 0.0, 30.0, 30.0);
+        let over = tiles_for_bbox(&BBox::from((-30.0, 0.0, 30.0, 30.0)));
         assert!(
             over.is_err(),
             "over-cap bbox must error ({} tiles requested)",

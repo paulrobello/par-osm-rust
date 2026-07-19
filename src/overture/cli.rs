@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use crate::bbox::BBox;
 use crate::osm::OsmData;
 // QA-107: truncation helpers consolidated in `crate::text_truncate`.
 use crate::text_truncate::{str_prefix_at_boundary, str_suffix_at_boundary};
@@ -282,13 +283,14 @@ pub(super) fn validate_cli_type(cli_type: &str) -> Result<()> {
 /// times out.
 pub fn fetch_geojson_for_type(
     cli_type: &str,
-    bbox: (f64, f64, f64, f64),
+    bbox: &BBox,
     timeout_secs: u64,
 ) -> Result<String> {
     validate_cli_type(cli_type)?;
 
-    let (min_lat, min_lon, max_lat, max_lon) = bbox;
-    // Overture CLI expects W,S,E,N order (min_lon, min_lat, max_lon, max_lat).
+    // ARC-106: Overture CLI expects WSEN order — `BBox::wsen()` is the
+    // boundary adapter that produces it from the crate's SWNE storage.
+    let (min_lon, min_lat, max_lon, max_lat) = bbox.wsen();
     let bbox_str = format!("{min_lon},{min_lat},{max_lon},{max_lat}");
 
     // Write output to a named temp file so the CLI can stream to disk.
@@ -367,7 +369,7 @@ fn empty_osm_data() -> OsmData {
 fn fetch_one_theme(
     theme: OvertureTheme,
     cli_type: &'static str,
-    bbox: (f64, f64, f64, f64),
+    bbox: &BBox,
     params: &OvertureParams,
     cache_dir: &Path,
     cli_version: &str,
@@ -423,23 +425,24 @@ fn fetch_one_theme(
 ///
 /// ```no_run
 /// # #[cfg(feature = "blocking")] fn main() -> anyhow::Result<()> {
+/// use par_osm_rust::bbox::BBox;
 /// use par_osm_rust::overture::{fetch_overture_data, OvertureParams, OvertureTheme};
 ///
-/// let bbox = (38.0, -121.0, 38.01, -120.99); // south, west, north, east
+/// let bbox = BBox::new(38.0, -121.0, 38.01, -120.99)?; // south, west, north, east
 /// let params = OvertureParams {
 ///     enabled: true,
 ///     themes: vec![OvertureTheme::Place],
 ///     ..Default::default()
 /// };
 /// let mut progress = |_: f32, _: &str| {};
-/// let data = fetch_overture_data(bbox, &params, &mut progress)?;
+/// let data = fetch_overture_data(&bbox, &params, &mut progress)?;
 /// println!("{} ways", data.iter_ways().count());
 /// # Ok(())
 /// # }
 /// # #[cfg(not(feature = "blocking"))] fn main() {}
 /// ```
 pub fn fetch_overture_data(
-    bbox: (f64, f64, f64, f64),
+    bbox: &BBox,
     params: &OvertureParams,
     progress_cb: &mut dyn FnMut(f32, &str),
 ) -> Result<OsmData> {
@@ -457,7 +460,7 @@ pub fn fetch_overture_data(
 /// bubbling errors. Applications that need explicit fallback status should prefer
 /// [`crate::sources::fetch_map_data`].
 pub fn fetch_overture_data_best_effort(
-    bbox: (f64, f64, f64, f64),
+    bbox: &BBox,
     params: &OvertureParams,
     progress_cb: &mut dyn FnMut(f32, &str),
 ) -> OsmData {
@@ -499,7 +502,7 @@ enum FailurePolicy {
 /// miss + parse via [`fetch_one_theme`], the final stats log, and the
 /// trailing `1.0` progress ping.
 fn fetch_overture_with_policy(
-    bbox: (f64, f64, f64, f64),
+    bbox: &BBox,
     params: &OvertureParams,
     progress_cb: &mut dyn FnMut(f32, &str),
     policy: FailurePolicy,
@@ -531,10 +534,10 @@ fn fetch_overture_with_policy(
     let theme_names: Vec<String> = params.themes.iter().map(|t| t.to_string()).collect();
     log::info!(
         "Starting Overture Maps fetch (bbox: {:.4},{:.4},{:.4},{:.4}, themes: {}, cli_version: {})",
-        bbox.0,
-        bbox.1,
-        bbox.2,
-        bbox.3,
+        bbox.south,
+        bbox.west,
+        bbox.north,
+        bbox.east,
         theme_names.join(", "),
         cli_version,
     );

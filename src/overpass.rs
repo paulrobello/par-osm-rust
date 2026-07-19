@@ -8,6 +8,7 @@ use anyhow::{Result, bail};
 use reqwest::header::{CONTENT_TYPE, USER_AGENT};
 use url::Url;
 
+use crate::bbox::BBox;
 use crate::filter::FeatureFilter;
 use crate::osm::OsmData;
 // QA-107: truncation helpers consolidated in `crate::text_truncate`.
@@ -123,7 +124,9 @@ pub fn default_overpass_url() -> Cow<'static, str> {
 /// Build an Overpass QL query (XML output) for the given bounding box,
 /// including only the feature types enabled in `filter`.
 ///
-/// `bbox` is `(south, west, north, east)` in decimal degrees.
+/// ARC-106: bbox is the validated [`BBox`] newtype; validation runs once at
+/// construction. The legacy `(f64, f64, f64, f64)` SWNE constructor is still
+/// reachable via [`BBox::from`].
 ///
 /// # Errors
 ///
@@ -133,11 +136,10 @@ pub fn default_overpass_url() -> Cow<'static, str> {
 /// are false, so the explicit `is_finite()` check inside the validator is
 /// what catches NaN (the previous `south >= north` guard could not).
 /// Returns `Err` if every feature type is disabled (nothing to query).
-pub fn build_overpass_query(bbox: (f64, f64, f64, f64), filter: &FeatureFilter) -> Result<String> {
-    let (south, west, north, east) = bbox;
-    crate::bbox::validate_bbox(south, west, north, east)?;
+pub fn build_overpass_query(bbox: &BBox, filter: &FeatureFilter) -> Result<String> {
+    crate::bbox::validate_bbox(bbox.south, bbox.west, bbox.north, bbox.east)?;
 
-    let b = format!("{south},{west},{north},{east}");
+    let b = format!("{},{},{},{}", bbox.south, bbox.west, bbox.north, bbox.east);
     let mut parts: Vec<String> = Vec::new();
 
     if filter.roads {
@@ -271,7 +273,7 @@ fn shared_client() -> Result<&'static reqwest::blocking::Client> {
 /// internal `MAX_OVERPASS_ERROR_BODY_READ_BYTES` because only a 4 KiB
 /// snippet is surfaced into the error message.
 pub fn fetch_osm_xml(
-    bbox: (f64, f64, f64, f64),
+    bbox: &BBox,
     filter: &FeatureFilter,
     overpass_url: &str,
 ) -> Result<String> {
@@ -337,7 +339,7 @@ fn build_overpass_request(
 /// [`crate::osm::parse_osm_xml_str`] (malformed XML). Cache I/O failures
 /// (read miss, write failure) are logged and do not propagate.
 pub fn fetch_osm_data(
-    bbox: (f64, f64, f64, f64),
+    bbox: &BBox,
     filter: &FeatureFilter,
     use_cache: bool,
     overpass_url: &str,
@@ -354,14 +356,22 @@ pub fn fetch_osm_data(
             log::info!("Cache containment hit — reusing larger cached area");
             return crate::osm::parse_osm_xml_str(&xml);
         }
-        log::info!("Cache miss — fetching from Overpass (bbox {bbox:?})");
+        log::info!(
+            "Cache miss — fetching from Overpass (bbox {:?})",
+            bbox.swne()
+        );
     } else {
-        log::info!("Force-fetching from Overpass (bbox {bbox:?})");
+        log::info!(
+            "Force-fetching from Overpass (bbox {:?})",
+            bbox.swne()
+        );
     }
 
     let xml = fetch_osm_xml(bbox, filter, overpass_url)?;
 
-    if let Err(e) = crate::osm_cache::write_for_url(&key, bbox, filter, &xml, overpass_url) {
+    if let Err(e) =
+        crate::osm_cache::write_for_url(&key, bbox, filter, &xml, overpass_url)
+    {
         log::warn!("Cache write failed: {e}");
     }
 
@@ -394,7 +404,7 @@ mod tests {
     #[test]
     fn query_includes_all_types_by_default() {
         let filter = FeatureFilter::default();
-        let q = build_overpass_query((51.5, -0.13, 51.52, -0.10), &filter).unwrap();
+        let q = build_overpass_query(&BBox::from((51.5, -0.13, 51.52, -0.10)), &filter).unwrap();
         assert!(q.contains(r#"way["highway"]"#), "missing highway");
         assert!(q.contains(r#"way["building"]"#), "missing building");
         assert!(q.contains(r#"way["waterway"]"#), "missing waterway");
@@ -426,7 +436,7 @@ mod tests {
             roads: false,
             ..FeatureFilter::default()
         };
-        let q = build_overpass_query((51.5, -0.13, 51.52, -0.10), &filter).unwrap();
+        let q = build_overpass_query(&BBox::from((51.5, -0.13, 51.52, -0.10)), &filter).unwrap();
         assert!(!q.contains(r#"way["highway"]"#));
         assert!(q.contains(r#"way["building"]"#)); // others still present
     }
@@ -437,7 +447,7 @@ mod tests {
             water: false,
             ..FeatureFilter::default()
         };
-        let q = build_overpass_query((51.5, -0.13, 51.52, -0.10), &filter).unwrap();
+        let q = build_overpass_query(&BBox::from((51.5, -0.13, 51.52, -0.10)), &filter).unwrap();
         assert!(!q.contains(r#"way["waterway"]"#));
         assert!(!q.contains(r#"way["natural"="water"]"#));
     }
@@ -445,7 +455,7 @@ mod tests {
     #[test]
     fn query_contains_bbox_coords() {
         let filter = FeatureFilter::default();
-        let q = build_overpass_query((51.5, -0.13, 51.52, -0.10), &filter).unwrap();
+        let q = build_overpass_query(&BBox::from((51.5, -0.13, 51.52, -0.10)), &filter).unwrap();
         assert!(q.contains("51.5"), "missing south");
         assert!(q.contains("-0.13"), "missing west");
         assert!(q.contains("51.52"), "missing north");
@@ -455,14 +465,14 @@ mod tests {
     #[test]
     fn invalid_bbox_south_gt_north() {
         let filter = FeatureFilter::default();
-        let result = build_overpass_query((51.52, -0.13, 51.5, -0.10), &filter);
+        let result = build_overpass_query(&BBox::from_unchecked(51.52, -0.13, 51.5, -0.10), &filter);
         assert!(result.is_err(), "should fail when south >= north");
     }
 
     #[test]
     fn invalid_bbox_west_gt_east() {
         let filter = FeatureFilter::default();
-        let result = build_overpass_query((51.5, -0.10, 51.52, -0.13), &filter);
+        let result = build_overpass_query(&BBox::from_unchecked(51.5, -0.10, 51.52, -0.13), &filter);
         assert!(result.is_err(), "should fail when west >= east");
     }
 
@@ -473,26 +483,26 @@ mod tests {
         let filter = FeatureFilter::default();
         // All NaN comparisons are false, so the previous `south >= north`
         // check could not catch NaN; the shared validator's is_finite() does.
-        assert!(build_overpass_query((f64::NAN, -0.13, 51.52, -0.10), &filter).is_err());
-        assert!(build_overpass_query((51.5, f64::NAN, 51.52, -0.10), &filter).is_err());
-        assert!(build_overpass_query((51.5, -0.13, f64::NAN, -0.10), &filter).is_err());
-        assert!(build_overpass_query((51.5, -0.13, 51.52, f64::NAN), &filter).is_err());
+        assert!(build_overpass_query(&BBox::from_unchecked(f64::NAN, -0.13, 51.52, -0.10), &filter).is_err());
+        assert!(build_overpass_query(&BBox::from_unchecked(51.5, f64::NAN, 51.52, -0.10), &filter).is_err());
+        assert!(build_overpass_query(&BBox::from_unchecked(51.5, -0.13, f64::NAN, -0.10), &filter).is_err());
+        assert!(build_overpass_query(&BBox::from_unchecked(51.5, -0.13, 51.52, f64::NAN), &filter).is_err());
     }
 
     #[test]
     fn invalid_bbox_infinity_rejected() {
         let filter = FeatureFilter::default();
-        assert!(build_overpass_query((f64::INFINITY, -0.13, 51.52, -0.10), &filter).is_err());
-        assert!(build_overpass_query((51.5, -0.13, 51.52, f64::NEG_INFINITY), &filter).is_err());
+        assert!(build_overpass_query(&BBox::from_unchecked(f64::INFINITY, -0.13, 51.52, -0.10), &filter).is_err());
+        assert!(build_overpass_query(&BBox::from_unchecked(51.5, -0.13, 51.52, f64::NEG_INFINITY), &filter).is_err());
     }
 
     #[test]
     fn invalid_bbox_out_of_range_lat_lon_rejected() {
         let filter = FeatureFilter::default();
         // lat 95 is well-ordered but out of range — previously accepted.
-        assert!(build_overpass_query((95.0, -0.13, 96.0, -0.10), &filter).is_err());
+        assert!(build_overpass_query(&BBox::from_unchecked(95.0, -0.13, 96.0, -0.10), &filter).is_err());
         // lon 200 likewise.
-        assert!(build_overpass_query((51.5, 199.0, 51.52, 200.0), &filter).is_err());
+        assert!(build_overpass_query(&BBox::from_unchecked(51.5, 199.0, 51.52, 200.0), &filter).is_err());
     }
 
     #[test]
@@ -506,7 +516,7 @@ mod tests {
             landuse: false,
             railways: false,
         };
-        let q = build_overpass_query((51.5, -0.13, 51.52, -0.10), &filter).unwrap();
+        let q = build_overpass_query(&BBox::from((51.5, -0.13, 51.52, -0.10)), &filter).unwrap();
         assert!(
             q.contains(r#"node["amenity"]"#),
             "POI node queries should always be present"
