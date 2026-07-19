@@ -286,13 +286,20 @@ impl OsmData {
     ///
     /// * `nodes` — extended from `other` via `HashMap::extend`. **Collision
     ///   semantics: last-write-wins** — a node ID present in both `self` and
-    ///   `other` keeps `other`'s value. (Safe by construction today because
-    ///   distinct fetches mint disjoint IDs, but the documented contract is
-    ///   last-write-wins should a future caller allow collisions; see QA-015.)
-    /// * `ways` — `other`'s ways are appended in order; their indices in
-    ///   `ways_by_id` are shifted by `self.ways.len()` so each `(id → index)`
-    ///   entry still points at the right slot. Same last-write-wins collision
-    ///   rule applies to `ways_by_id` if a way ID appears on both sides.
+    ///   `other` keeps `other`'s value. Callers merging synthetic-Overture
+    ///   data must thread one `OvertureIdAllocator` per fetch so cross-theme
+    ///   parses mint disjoint IDs (ARC-101); merging two independently
+    ///   allocated Overture results remains the caller's responsibility.
+    /// * `ways` — `other`'s ways are appended in order, **skipping** any whose
+    ///   ID is already present in `self.ways_by_id` (first-wins; a
+    ///   `log::warn!` is emitted per skip). The skip-first-wins rule keeps
+    ///   the `ways` / `ways_by_id` invariant intact when a caller merges two
+    ///   [`OsmData`]s whose way IDs were not produced by a single allocator
+    ///   (e.g. an external caller merging two independently-fetched Overture
+    ///   results). Within a single multi-theme fetch the per-fetch
+    ///   `OvertureIdAllocator` (ARC-101) makes the skip arm unreachable.
+    ///   Indices for appended ways are shifted by `self.ways.len()` so each
+    ///   `(id → index)` entry points at the right slot.
     /// * `relations` — `other`'s relations are appended; no de-duplication.
     /// * `poi_nodes`, `addr_nodes`, `tree_nodes` — `other`'s entries are
     ///   appended in order; no de-duplication.
@@ -300,17 +307,22 @@ impl OsmData {
     ///   `(min(south), min(west), max(north), max(east))`. When only
     ///   one side has a bbox, that bbox is kept. When neither side has one,
     ///   `bounds` remain `None`.
+    ///
+    /// Like [`OsmData::clip_to_bbox`], this method ends with a
+    /// `debug_assert!(self.validate_invariants().is_ok(), ...)` so the
+    /// `ways` / `ways_by_id` invariant is checked in debug builds after
+    /// every merge (ARC-103).
     pub fn merge(&mut self, other: OsmData) {
         self.nodes.extend(other.nodes);
-        let offset = self.ways.len();
-        self.ways.extend(other.ways);
-        // Adjust indices from `other` to account for the ways already in `self`.
-        self.ways_by_id.extend(
-            other
-                .ways_by_id
-                .into_iter()
-                .map(|(id, idx)| (id, idx + offset)),
-        );
+        for way in other.ways {
+            if self.ways_by_id.contains_key(&way.id) {
+                log::warn!("OsmData::merge: skipping way with duplicate id {}", way.id);
+                continue;
+            }
+            let idx = self.ways.len();
+            self.ways_by_id.insert(way.id, idx);
+            self.ways.push(way);
+        }
         self.relations.extend(other.relations);
         self.poi_nodes.extend(other.poi_nodes);
         self.addr_nodes.extend(other.addr_nodes);
@@ -322,6 +334,11 @@ impl OsmData {
             (None, b) => self.bounds = b,
             _ => {}
         }
+
+        debug_assert!(
+            self.validate_invariants().is_ok(),
+            "OsmData::merge produced an inconsistent state"
+        );
     }
 
     /// Clip data to a bounding box, keeping only features that touch the bbox.

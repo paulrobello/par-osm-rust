@@ -525,6 +525,73 @@ mod tests {
         );
     }
 
+    // ── ARC-103: merge skip-on-collision + invariant guard ──────────────
+
+    /// Build an [`OsmData`] with a single way carrying `way_id` and one node.
+    fn one_way_osm(way_id: i64, node_id: i64, lat: f64, lon: f64) -> OsmData {
+        OsmData::new(
+            HashMap::from([(node_id, OsmNode { lat, lon })]),
+            vec![OsmWay {
+                id: way_id,
+                tags: HashMap::from([("name".to_string(), format!("way-{way_id}"))]),
+                node_refs: vec![node_id],
+            }],
+            Vec::new(),
+            Some((lat, lon, lat, lon)),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn merge_keeps_first_way_on_collision_and_preserves_invariant() {
+        // ARC-103: a way ID present on both sides must NOT corrupt the
+        // `ways` / `ways_by_id` invariant. Skip-first-wins: the first way
+        // (in `self`) survives, the duplicate (in `other`) is dropped with
+        // a warning. The trailing debug_assert! in `merge` must not fire.
+        let mut a = one_way_osm(10, 1, 51.50, -0.10);
+        let b = one_way_osm(10, 2, 48.85, 2.35); // same way id, different node/coord
+
+        a.merge(b);
+
+        // The first way (id=10, name="way-10", node=1) is retained.
+        assert_eq!(
+            a.ways.len(),
+            1,
+            "colliding way must be skipped, not appended"
+        );
+        assert_eq!(a.ways[0].id, 10);
+        assert_eq!(a.ways[0].tags["name"], "way-10");
+        // Its node survives.
+        assert_eq!(
+            a.nodes.len(),
+            2,
+            "both nodes (1 and 2) are kept; nodes are last-write-wins by id, and the ids differ"
+        );
+        assert!(a.nodes.contains_key(&1));
+        assert!(a.nodes.contains_key(&2));
+
+        // The invariant holds — and the debug_assert! at the end of `merge`
+        // did not fire (otherwise this test would have panicked in debug
+        // builds before reaching the assertion).
+        assert!(a.validate_invariants().is_ok());
+    }
+
+    #[test]
+    fn merge_appends_disjoint_ways_and_preserves_invariant() {
+        // ARC-103 positive case: two disjoint way-ID sets merge cleanly.
+        let mut a = one_way_osm(10, 1, 51.50, -0.10);
+        let b = one_way_osm(20, 2, 48.85, 2.35);
+
+        a.merge(b);
+
+        assert_eq!(a.ways.len(), 2);
+        assert_eq!(a.ways[0].id, 10);
+        assert_eq!(a.ways[1].id, 20);
+        assert!(a.validate_invariants().is_ok());
+    }
+
     #[test]
     fn parse_osm_xml_str_returns_data_that_satisfies_the_invariant() {
         let data = parse_osm_xml_str(MINIMAL_OSM).unwrap();

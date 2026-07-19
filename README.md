@@ -122,17 +122,9 @@ Important nuance: `PoiSourceMode::OverturePreferred` is the default policy, but 
 | --- | --- | --- |
 | `enabled` | `false` | Overture is never fetched unless this is `true`. |
 | `themes` | `OvertureTheme::all()` | Every supported theme. |
-| `priority` | empty map | Per-theme source priority; missing entries resolve to `ThemePriority::Both` via `priority_for(theme)`. |
+| `priority` | empty map | **Deprecated (ARC-102, never implemented; will be removed in 0.3.0).** Parsed for backwards config-file compatibility but no merge path consumes it — every merge keeps both sources' non-POI geometry. |
 | `timeout_secs` | `120` | Per `overturemaps download` CLI invocation timeout. |
 | `cache_ttl_secs` | `None` | `None` selects the ~30-day default TTL, `Some(0)` disables the Overture cache, any other `Some(secs)` is honored verbatim. |
-
-`ThemePriority` controls which source wins when OSM and Overture both cover the same **non-POI** theme (POIs go through the `PoiSourceMode` policy above):
-
-| Variant | Behavior |
-| --- | --- |
-| `Overture` | Prefer Overture features for this theme. |
-| `Osm` | Prefer OSM/Overpass features for this theme. |
-| `Both` | Keep features from both sources. This is the default when a theme is not present in `priority`. |
 
 POI source modes:
 

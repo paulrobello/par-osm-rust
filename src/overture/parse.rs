@@ -15,12 +15,15 @@ use super::theme::{OvertureTheme, map_tags_for_theme};
 // ── Synthetic node-ID allocation ──────────────────────────────────────────
 //
 // Overture geometry nodes and ways do not carry OSM IDs, so each parse
-// assigns synthetic IDs from a fresh [`OvertureIdAllocator`] owned by
-// `parse_overture_geojson`. The allocator starts at
-// `SYNTHETIC_OVERTURE_ID_BASE` and decrements per ID, making parses
-// deterministic (ARC-009 / QA-010) and keeping the Overture range disjoint
-// from the writer's node/way/relation ranges and from real OSM IDs.
-// See `crate::synthetic_ids` for the centralized contract.
+// assigns synthetic IDs from an [`OvertureIdAllocator`]. A single allocator
+// is threaded through every parse call within one fetch so multi-theme
+// merges never collide (ARC-101); the public `parse_overture_geojson`
+// constructs a fresh allocator per call to preserve the ARC-009 / QA-010
+// per-parse determinism contract for standalone callers. The allocator
+// starts at `SYNTHETIC_OVERTURE_ID_BASE` and decrements per ID, keeping the
+// Overture range disjoint from the writer's node/way/relation ranges and
+// from real OSM IDs. See `crate::synthetic_ids` for the centralized
+// contract.
 
 /// Update a running bounding-box accumulator with a new coordinate.
 fn update_bounds(
@@ -137,7 +140,36 @@ fn push_way_from_coords(
 /// - `MultiPolygon` geometries produce one way per polygon outer ring.
 ///
 /// Synthetic negative node IDs are assigned to avoid collision with OSM IDs.
+///
+/// Constructs a fresh [`OvertureIdAllocator`] for this single call, so two
+/// parses of identical GeoJSON produce identical ID sequences (ARC-009 /
+/// QA-010). For multi-theme fetches that merge results into one
+/// [`OsmData`], the fetch orchestrator must instead thread a single
+/// allocator through [`parse_overture_geojson_with_allocator`] so the
+/// merged ways/`ways_by_id` invariant cannot be violated by two themes
+/// emitting the same IDs (ARC-101).
 pub fn parse_overture_geojson(geojson_str: &str, theme: OvertureTheme) -> Result<OsmData> {
+    let mut id_alloc = OvertureIdAllocator::new();
+    parse_overture_geojson_with_allocator(geojson_str, theme, &mut id_alloc)
+}
+
+/// Crate-internal variant of [`parse_overture_geojson`] that draws synthetic
+/// IDs from a caller-owned [`OvertureIdAllocator`] instead of constructing a
+/// fresh one.
+///
+/// Multi-theme fetch orchestration (see
+/// `crate::overture::cli::fetch_overture_data`) constructs **one** allocator
+/// per fetch and threads it through every per-theme parse call. Because a
+/// single allocator never reissues an ID, the merged ways across all themes
+/// carry disjoint IDs and [`OsmData::merge`] preserves the `ways` /
+/// `ways_by_id` invariant (ARC-101). The caller still gets ARC-009 / QA-010
+/// determinism at the fetch granularity: identical fetch inputs (bbox +
+/// theme set + allocator base) yield identical ID sequences.
+pub(crate) fn parse_overture_geojson_with_allocator(
+    geojson_str: &str,
+    theme: OvertureTheme,
+    id_alloc: &mut OvertureIdAllocator,
+) -> Result<OsmData> {
     let root: Value = serde_json::from_str(geojson_str).context("parsing Overture GeoJSON")?;
 
     let features = root
@@ -145,10 +177,6 @@ pub fn parse_overture_geojson(geojson_str: &str, theme: OvertureTheme) -> Result
         .and_then(|f| f.as_array())
         .map(|a| a.as_slice())
         .unwrap_or(&[]);
-
-    // Fresh per-parse allocator: identical GeoJSON inputs produce identical
-    // synthetic ID sequences (ARC-009 / QA-010). See `crate::synthetic_ids`.
-    let mut id_alloc = OvertureIdAllocator::new();
 
     let mut nodes: HashMap<i64, OsmNode> = HashMap::new();
     let mut ways: Vec<OsmWay> = Vec::new();
@@ -177,7 +205,7 @@ pub fn parse_overture_geojson(geojson_str: &str, theme: OvertureTheme) -> Result
                 if let Some(coord) = coordinates
                     && let Some((id, node)) = coord_to_node(
                         coord,
-                        &mut id_alloc,
+                        id_alloc,
                         &mut min_lat,
                         &mut min_lon,
                         &mut max_lat,
@@ -211,7 +239,7 @@ pub fn parse_overture_geojson(geojson_str: &str, theme: OvertureTheme) -> Result
                 if let Some(coords) = coordinates.and_then(|c| c.as_array()) {
                     push_way_from_coords(
                         coords,
-                        &mut id_alloc,
+                        id_alloc,
                         &mut nodes,
                         &mut ways,
                         tags,
@@ -232,7 +260,7 @@ pub fn parse_overture_geojson(geojson_str: &str, theme: OvertureTheme) -> Result
                 {
                     push_way_from_coords(
                         outer_ring,
-                        &mut id_alloc,
+                        id_alloc,
                         &mut nodes,
                         &mut ways,
                         tags,
@@ -258,7 +286,7 @@ pub fn parse_overture_geojson(geojson_str: &str, theme: OvertureTheme) -> Result
                             // end of the arm.
                             push_way_from_coords(
                                 outer_ring,
-                                &mut id_alloc,
+                                id_alloc,
                                 &mut nodes,
                                 &mut ways,
                                 tags.clone(),

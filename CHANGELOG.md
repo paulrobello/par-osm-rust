@@ -9,7 +9,19 @@ Released versions are published to [crates.io](https://crates.io/crates/par-osm-
 
 ## [Unreleased]
 
-No changes since 0.2.1.
+### Deprecated
+
+- **`ThemePriority` API surface (ARC-102).** `overture::ThemePriority`,
+  `OvertureParams::priority`, `OvertureParams::priority_for`, and the
+  `source_options` parsers `parse_theme_priority`, `parse_overture_priority`,
+  and `parse_overture_priority_map` are all marked
+  `#[deprecated(since = "0.2.2", note = "never implemented; will be removed in 0.3.0")]`.
+  The promised theme-priority filtering (`priority = { Building: Osm }` to
+  exclude Overture buildings) was never implemented — every merge
+  unconditionally keeps both sources' non-POI geometry. The deprecated
+  surface stays through 0.3.0 to preserve config-file compatibility; the
+  `priority` map is still parsed and serialized, it is just never consulted.
+  README and `PoiSourceMode::OsmOnly` rustdoc corrected to drop the claim.
 
 ## [0.2.1] - 2026-07-18
 

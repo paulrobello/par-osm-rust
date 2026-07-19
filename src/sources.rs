@@ -21,9 +21,8 @@ use crate::overture::OvertureParams;
 
 /// Policy for which POI source should appear in the normalized output.
 ///
-/// Non-POI Overture geometry may still be merged according to Overture theme
-/// priority when Overture data is fetched. This enum only controls the final
-/// `OsmData::poi_nodes` collection.
+/// Non-POI Overture geometry is merged unconditionally when Overture data is
+/// fetched. This enum only controls the final `OsmData::poi_nodes` collection.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PoiSourceMode {
@@ -31,12 +30,12 @@ pub enum PoiSourceMode {
     ///
     /// OSM/Overpass data is always fetched. When Overture is also enabled via
     /// [`SourceOptions::overture`], non-POI Overture geometry (e.g. building
-    /// footprints) is still merged into the result according to Overture theme
-    /// priority, but the final `poi_nodes` collection is reset to the OSM POIs
-    /// only — any Overture POIs are discarded before the merged result is
-    /// returned. Use this mode when you want Overture's richer geometry but
-    /// explicitly do not want its POI corpus, or when running against an
-    /// Overture release whose POI schema you do not trust.
+    /// footprints) is still merged into the result, but the final `poi_nodes`
+    /// collection is reset to the OSM POIs only — any Overture POIs are
+    /// discarded before the merged result is returned. Use this mode when you
+    /// want Overture's richer geometry but explicitly do not want its POI
+    /// corpus, or when running against an Overture release whose POI schema
+    /// you do not trust.
     OsmOnly,
     /// Use Overture POIs only; OSM POIs are cleared when Overture is unavailable.
     OvertureOnly,

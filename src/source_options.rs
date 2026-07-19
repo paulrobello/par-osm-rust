@@ -10,10 +10,19 @@
 use anyhow::{Result, bail};
 use std::collections::HashMap;
 
+// ARC-102: `ThemePriority` is deprecated (never implemented; will be removed
+// in 0.3.0). The three priority parsers below remain parseable for
+// backwards config-file compatibility and carry matching deprecations.
+#[allow(deprecated)]
 use crate::overture::{OvertureTheme, ThemePriority};
 use crate::sources::{OvertureFailureMode, PoiSourceMode};
 
 /// Parse a `ThemePriority` from a string ("overture", "osm", or "both").
+///
+/// **Deprecated (ARC-102, never implemented; will be removed in 0.3.0).**
+/// The parsed value is accepted but never consulted by any merge path.
+#[deprecated(since = "0.2.2", note = "never implemented; will be removed in 0.3.0")]
+#[allow(deprecated)]
 pub fn parse_theme_priority(s: &str) -> Result<ThemePriority> {
     match s.to_lowercase().as_str() {
         "overture" => Ok(ThemePriority::Overture),
@@ -24,6 +33,11 @@ pub fn parse_theme_priority(s: &str) -> Result<ThemePriority> {
 }
 
 /// Parse `"building=overture,transportation=osm"` into a priority map.
+///
+/// **Deprecated (ARC-102, never implemented; will be removed in 0.3.0).**
+/// The parsed map is accepted but never consulted by any merge path.
+#[deprecated(since = "0.2.2", note = "never implemented; will be removed in 0.3.0")]
+#[allow(deprecated)]
 pub fn parse_overture_priority(s: &str) -> Result<HashMap<OvertureTheme, ThemePriority>> {
     let mut map = HashMap::new();
     if s.is_empty() {
@@ -47,6 +61,11 @@ pub fn parse_overture_priority(s: &str) -> Result<HashMap<OvertureTheme, ThemePr
 }
 
 /// Parse a JSON object style per-theme priority map.
+///
+/// **Deprecated (ARC-102, never implemented; will be removed in 0.3.0).**
+/// The parsed map is accepted but never consulted by any merge path.
+#[deprecated(since = "0.2.2", note = "never implemented; will be removed in 0.3.0")]
+#[allow(deprecated)]
 pub fn parse_overture_priority_map(
     map: &HashMap<String, String>,
 ) -> Result<HashMap<OvertureTheme, ThemePriority>> {
@@ -120,6 +139,9 @@ pub fn parse_overture_failure_mode(s: &str) -> Result<OvertureFailureMode> {
 mod tests {
     use super::*;
 
+    // ARC-102: the deprecated parsers remain under test through 0.3.0 so
+    // config-file compatibility stays green.
+    #[allow(deprecated)]
     #[test]
     fn overture_priority_rejects_invalid_theme() {
         let err = parse_overture_priority("not-a-theme=osm")
@@ -129,6 +151,7 @@ mod tests {
         assert!(err.contains("unknown Overture theme 'not-a-theme'"));
     }
 
+    #[allow(deprecated)]
     #[test]
     fn overture_priority_rejects_invalid_priority_value() {
         let err = parse_overture_priority("building=preferred")
@@ -138,6 +161,7 @@ mod tests {
         assert!(err.contains("unknown priority 'preferred'"));
     }
 
+    #[allow(deprecated)]
     #[test]
     fn overture_priority_map_rejects_invalid_priority_value() {
         let map = HashMap::from([("building".to_string(), "preferred".to_string())]);

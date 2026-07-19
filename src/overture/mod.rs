@@ -35,6 +35,10 @@ pub use cache::{
     overture_cache_read, overture_cache_write,
 };
 pub use parse::parse_overture_geojson;
+// ARC-102: `ThemePriority` is deprecated (never implemented; will be removed
+// in 0.3.0). The re-export stays through 0.3.0 so downstream code that
+// references `crate::overture::ThemePriority` keeps compiling.
+#[allow(deprecated)]
 pub use theme::{OvertureTheme, ThemePriority};
 
 #[cfg(feature = "blocking")]
@@ -50,6 +54,8 @@ mod tests {
     use super::cli::validate_cli_type;
     use super::*;
     use crate::osm::FeatureSource;
+    use crate::synthetic_ids::OvertureIdAllocator;
+    use crate::synthetic_ids::SYNTHETIC_OVERTURE_ID_BASE;
     use chrono::Utc;
     #[cfg(all(unix, feature = "blocking"))]
     use std::ffi::OsString;
@@ -448,6 +454,85 @@ mod tests {
                 .collect::<std::collections::BTreeSet<_>>(),
             "node IDs diverged across identical parses"
         );
+    }
+
+    // ── Multi-theme merge tests (ARC-101) ───────────────────────────────
+
+    #[test]
+    fn shared_allocator_keeps_multi_theme_merge_consistent() {
+        // Regression for ARC-101: two themes parsed via ONE shared
+        // allocator must produce disjoint way IDs, so merging the second
+        // into the first keeps `ways`/`ways_by_id` consistent and every
+        // original node coordinate survives.
+        let building_geojson = polygon_feature(serde_json::json!({"class": "residential"}));
+        let segment_geojson = line_feature(serde_json::json!({"class": "primary"}));
+
+        let mut alloc = OvertureIdAllocator::new();
+        let mut building = super::parse::parse_overture_geojson_with_allocator(
+            &building_geojson,
+            OvertureTheme::Building,
+            &mut alloc,
+        )
+        .unwrap();
+        let segment = super::parse::parse_overture_geojson_with_allocator(
+            &segment_geojson,
+            OvertureTheme::Transportation,
+            &mut alloc,
+        )
+        .unwrap();
+
+        // Snapshot the building node coordinates + way count before merge.
+        let building_way_count = building.ways.len();
+        let segment_way_count = segment.ways.len();
+        let building_node_coords_before: Vec<(f64, f64)> =
+            building.nodes.values().map(|n| (n.lat, n.lon)).collect();
+        let segment_node_coords: Vec<(f64, f64)> =
+            segment.nodes.values().map(|n| (n.lat, n.lon)).collect();
+
+        building.merge(segment);
+
+        // (a) invariant survives the merge.
+        assert!(
+            building.validate_invariants().is_ok(),
+            "merge produced an inconsistent OsmData after a shared-allocator multi-theme parse"
+        );
+        // (b) way count is the sum of both parses.
+        assert_eq!(
+            building.ways.len(),
+            building_way_count + segment_way_count,
+            "way count after merge must equal the sum of both parses"
+        );
+        // (c) every pre-merge node coordinate is still present (no
+        // last-write-wins overwrite of a building node by a segment node).
+        for coord in &building_node_coords_before {
+            assert!(
+                building.nodes.values().any(|n| (n.lat, n.lon) == *coord),
+                "building node coordinate {coord:?} disappeared after merge"
+            );
+        }
+        for coord in &segment_node_coords {
+            assert!(
+                building.nodes.values().any(|n| (n.lat, n.lon) == *coord),
+                "segment node coordinate {coord:?} disappeared after merge"
+            );
+        }
+    }
+
+    #[test]
+    fn independent_allocators_collide_on_first_id() {
+        // Pins the ARC-101 rationale: two independent allocators in the
+        // same band DO collide — they both start at SYNTHETIC_OVERTURE_ID_BASE.
+        // This is exactly why fetch orchestration owns one allocator per
+        // fetch instead of letting each per-theme parse construct its own.
+        let mut a = OvertureIdAllocator::new();
+        let mut b = OvertureIdAllocator::new();
+        let a_first = a.next_id();
+        let b_first = b.next_id();
+        assert_eq!(
+            a_first, b_first,
+            "two fresh allocators must collide on their first ID (both start at SYNTHETIC_OVERTURE_ID_BASE)"
+        );
+        assert_eq!(a_first, SYNTHETIC_OVERTURE_ID_BASE);
     }
 
     // ── Cache tests ──────────────────────────────────────────────────────

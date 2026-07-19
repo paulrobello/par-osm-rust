@@ -15,6 +15,10 @@ use std::time::{Duration, SystemTime};
 
 use crate::cache_store::{CacheMeta as CacheMetaTrait, RawCache};
 
+// ARC-102: `ThemePriority` is deprecated (never implemented; will be
+// removed in 0.3.0). Still imported so `OvertureParams::priority` and
+// `priority_for` can keep their types through the deprecation window.
+#[allow(deprecated)]
 use super::theme::{OvertureTheme, ThemePriority};
 
 /// Default cache entry TTL when [`OvertureParams::cache_ttl_secs`] is `None`:
@@ -50,12 +54,20 @@ const OVERTURE_CACHE_DEFAULT_TTL_SECS: u64 = 30 * 24 * 60 * 60;
 /// assert!(params.enabled);
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(deprecated)] // ARC-102: derive expansions reference the deprecated `priority` field
 pub struct OvertureParams {
     /// Whether Overture should be fetched. Defaults to `false`.
     pub enabled: bool,
     /// Overture themes to fetch when enabled. Defaults to all supported themes.
     pub themes: Vec<OvertureTheme>,
     /// Per-theme source priority for non-POI features. Missing entries default to [`ThemePriority::Both`].
+    ///
+    /// **Deprecated (ARC-102, never implemented; will be removed in 0.3.0).**
+    /// The field is parsed and serialized but never consulted by any merge
+    /// path — every merge keeps both sources' non-POI geometry. Kept
+    /// through 0.3.0 to preserve `Serialize`/`Deserialize` compatibility
+    /// for existing config files.
+    #[deprecated(since = "0.2.2", note = "never implemented; will be removed in 0.3.0")]
     pub priority: std::collections::HashMap<OvertureTheme, ThemePriority>,
     /// Timeout for each Overture CLI download command.
     pub timeout_secs: u64,
@@ -68,6 +80,9 @@ pub struct OvertureParams {
 }
 
 impl Default for OvertureParams {
+    // ARC-102: references the deprecated `priority` field to preserve
+    // struct shape through 0.3.0; allowed explicitly so `-D warnings` stays green.
+    #[allow(deprecated)]
     fn default() -> Self {
         Self {
             enabled: false,
@@ -81,6 +96,12 @@ impl Default for OvertureParams {
 
 impl OvertureParams {
     /// Return the configured priority for `theme`, defaulting to [`ThemePriority::Both`].
+    ///
+    /// **Deprecated (ARC-102, never implemented; will be removed in 0.3.0).**
+    /// This accessor always returns the configured value but no merge path
+    /// consults it.
+    #[deprecated(since = "0.2.2", note = "never implemented; will be removed in 0.3.0")]
+    #[allow(deprecated)]
     pub fn priority_for(&self, theme: OvertureTheme) -> ThemePriority {
         self.priority
             .get(&theme)

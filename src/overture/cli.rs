@@ -17,8 +17,9 @@ use super::cache::{
     OvertureParams, overture_cache_dir, overture_cache_key_with_version, overture_cache_read,
     overture_cache_write,
 };
-use super::parse::parse_overture_geojson;
+use super::parse::parse_overture_geojson_with_allocator;
 use super::theme::OvertureTheme;
+use crate::synthetic_ids::OvertureIdAllocator;
 
 /// Environment override that selects an absolute path to the `overturemaps`
 /// CLI binary, bypassing the default PATH lookup (SEC-010). Must be set to an
@@ -358,6 +359,11 @@ fn empty_osm_data() -> OsmData {
 /// parsed [`OsmData`] for the single theme. Cache key is version-aware
 /// ([`overture_cache_key_with_version`]) and reads enforce
 /// [`OvertureParams::cache_ttl`] (ARC-001).
+///
+/// `id_alloc` is threaded through [`parse_overture_geojson_with_allocator`]
+/// so a single fetch that merges multiple themes never mints colliding
+/// synthetic IDs across themes (ARC-101). The caller owns the allocator and
+/// passes the same `&mut` to every per-theme call in one fetch.
 fn fetch_one_theme(
     theme: OvertureTheme,
     cli_type: &'static str,
@@ -365,6 +371,7 @@ fn fetch_one_theme(
     params: &OvertureParams,
     cache_dir: &Path,
     cli_version: &str,
+    id_alloc: &mut OvertureIdAllocator,
 ) -> Result<OsmData> {
     let key = overture_cache_key_with_version(bbox, cli_type, cli_version);
     let ttl = params.cache_ttl();
@@ -384,7 +391,7 @@ fn fetch_one_theme(
         }
     };
 
-    parse_overture_geojson(&geojson, theme)
+    parse_overture_geojson_with_allocator(&geojson, theme, id_alloc)
         .with_context(|| format!("parsing Overture GeoJSON for type '{cli_type}'"))
 }
 
@@ -468,11 +475,26 @@ pub fn fetch_overture_data(
     let total = pairs.len() as f32;
     let mut accumulated = empty_osm_data();
 
+    // One allocator per fetch (ARC-101): threading the same `&mut` through
+    // every per-theme parse guarantees unique synthetic IDs across themes,
+    // so `merge` cannot violate the `ways` / `ways_by_id` invariant on the
+    // accumulated result. Per-fetch determinism (identical inputs → identical
+    // IDs) is preserved because every fetch starts a fresh allocator.
+    let mut id_alloc = OvertureIdAllocator::new();
+
     for (i, (theme, cli_type)) in pairs.iter().enumerate() {
         let pct = i as f32 / total;
         progress_cb(pct, &format!("Fetching Overture {cli_type}…"));
 
-        let data = fetch_one_theme(*theme, cli_type, bbox, params, &cache_dir, cli_version)?;
+        let data = fetch_one_theme(
+            *theme,
+            cli_type,
+            bbox,
+            params,
+            &cache_dir,
+            cli_version,
+            &mut id_alloc,
+        )?;
         accumulated.merge(data);
     }
 
@@ -524,11 +546,22 @@ pub fn fetch_overture_data_best_effort(
     let total = pairs.len() as f32;
     let mut accumulated = empty_osm_data();
 
+    // One allocator per fetch (ARC-101) — see `fetch_overture_data`.
+    let mut id_alloc = OvertureIdAllocator::new();
+
     for (i, (theme, cli_type)) in pairs.iter().enumerate() {
         let pct = i as f32 / total;
         progress_cb(pct, &format!("Fetching Overture {cli_type}…"));
 
-        match fetch_one_theme(*theme, cli_type, bbox, params, &cache_dir, cli_version) {
+        match fetch_one_theme(
+            *theme,
+            cli_type,
+            bbox,
+            params,
+            &cache_dir,
+            cli_version,
+            &mut id_alloc,
+        ) {
             Ok(data) => accumulated.merge(data),
             Err(e) => log::warn!("Skipping Overture type '{cli_type}': {e}"),
         }

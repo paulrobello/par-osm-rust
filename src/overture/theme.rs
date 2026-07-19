@@ -91,6 +91,19 @@ impl std::fmt::Display for OvertureTheme {
 }
 
 /// Which data source wins when Overture and OSM both cover the same non-POI theme.
+///
+/// **Deprecated (ARC-102, never implemented; will be removed in 0.3.0).**
+/// This enum, [`OvertureParams::priority`](super::OvertureParams::priority),
+/// and the `source_options` priority parsers are public and parseable but
+/// no code path consumes them — every merge unconditionally keeps both
+/// sources' non-POI geometry (equivalent to [`ThemePriority::Both`]).
+/// Setting `priority = { Building: Osm }` does not exclude Overture
+/// buildings. The promised behavior was never shipped, so 0.2.2 deprecates
+/// the API surface and 0.3.0 will remove it. If you need theme-priority
+/// filtering, open an issue so it can be implemented rather than re-added
+/// in its current shape.
+#[deprecated(since = "0.2.2", note = "never implemented; will be removed in 0.3.0")]
+#[allow(deprecated)] // derive expansions (Default, serde) reference the variants
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ThemePriority {

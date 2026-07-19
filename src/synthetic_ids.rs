@@ -34,12 +34,24 @@
 //!
 //! # Determinism
 //!
-//! The Overture allocator (`OvertureIdAllocator`) is instantiated fresh
-//! on every call to `parse_overture_geojson` and dropped when the parse
-//! returns, so two parses of identical GeoJSON produce identical ID
-//! sequences (ARC-009 / QA-010). The previous design used a process-global
-//! `AtomicI64` whose value depended on every prior parse in the process,
-//! making cache keys and round-trip tests non-deterministic.
+//! The Overture allocator (`OvertureIdAllocator`) follows a per-fetch
+//! ownership rule: a single fetch constructs **one** allocator and threads
+//! it through every per-theme parse call, so identical fetch inputs (bbox +
+//! theme set + allocator base) yield identical ID sequences (ARC-009 /
+//! QA-010). The previous design used a process-global `AtomicI64` whose
+//! value depended on every prior parse in the process, making cache keys
+//! and round-trip tests non-deterministic; the fix reset the allocator per
+//! parse, but that introduced cross-theme collisions (ARC-101) because two
+//! parses within one multi-theme fetch re-issued the same IDs. The current
+//! contract is: **one allocator per fetch** — unique IDs within a fetch,
+//! determinism across fetches.
+//!
+//! Note that two **independent** allocators in the same band DO collide
+//! (they each start at `SYNTHETIC_OVERTURE_ID_BASE`), which is precisely
+//! why fetch orchestration owns the allocator instead of letting each
+//! per-theme parse construct its own. The public `parse_overture_geojson`
+//! still constructs a fresh allocator for callers parsing one theme
+//! standalone, preserving its ARC-009 per-call determinism contract.
 
 use std::collections::HashSet;
 
@@ -66,15 +78,30 @@ const _: () = assert!(SYNTHETIC_WAY_ID_BASE < SYNTHETIC_RELATION_ID_BASE);
 const _: () = assert!(SYNTHETIC_RELATION_ID_BASE < SYNTHETIC_OVERTURE_ID_BASE);
 const _: () = assert!(SYNTHETIC_OVERTURE_ID_BASE < 0);
 
-/// Deterministic per-parse allocator for Overture synthetic IDs.
+/// Deterministic allocator for Overture synthetic IDs, owned per fetch.
 ///
-/// Created fresh at the entry point of each Overture parse and dropped when
-/// the parse completes. The counter starts at [`SYNTHETIC_OVERTURE_ID_BASE`]
-/// and decrements on every allocation, so two parses of identical input
-/// produce identical ID sequences. There is no global state: concurrent
-/// parses (e.g. in separate threads) each own an independent allocator.
+/// The counter starts at [`SYNTHETIC_OVERTURE_ID_BASE`] and decrements on
+/// every allocation. There is no global state: concurrent fetches (e.g. in
+/// separate threads) each own an independent allocator. There is also no
+/// internal mutation guard against re-entrant use — the contract is
+/// enforced by ownership:
 ///
-/// IDs issued within a single parse never collide with each other. They
+/// - **Within a single fetch**, the orchestrator (e.g.
+///   `crate::overture::cli::fetch_overture_data`) constructs exactly one
+///   allocator and threads `&mut` it through every per-theme parse call.
+///   Because a single allocator never reissues an ID, the merged ways
+///   across all themes carry disjoint IDs and [`crate::osm::OsmData::merge`]
+///   preserves its `ways` / `ways_by_id` invariant (ARC-101).
+/// - **Across fetches**, every fetch starts a fresh allocator at
+///   [`SYNTHETIC_OVERTURE_ID_BASE`], so identical fetch inputs produce
+///   identical ID sequences (ARC-009 / QA-010 determinism).
+/// - **Standalone parses** via the public `parse_overture_geojson` get a
+///   fresh allocator per call — same per-call determinism, but a caller
+///   that merges two such parses is responsible for the resulting
+///   collision (two independent allocators in the same band DO collide on
+///   their first ID).
+///
+/// IDs issued within a single allocator never collide with each other. They
 /// also never collide with the writer's node/way/relation ranges (which
 /// live at more-negative bases — see the module docs) or with real OSM IDs
 /// (which are non-negative).
@@ -86,6 +113,8 @@ pub(crate) struct OvertureIdAllocator {
 impl OvertureIdAllocator {
     /// Create a fresh allocator whose first [`Self::next_id`] call returns
     /// [`SYNTHETIC_OVERTURE_ID_BASE`].
+    ///
+    /// Fetch orchestrators should construct exactly one per fetch (ARC-101).
     pub(crate) fn new() -> Self {
         Self {
             next: SYNTHETIC_OVERTURE_ID_BASE,
