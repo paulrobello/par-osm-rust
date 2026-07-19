@@ -62,6 +62,28 @@ jobs:
       - name: Run tests
         run: cargo test --all-features
 
+  pure-subset:
+    name: Pure subset (--no-default-features)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      # The pure subset (no `blocking` feature) must compile, lint, and test
+      # cleanly — it is the crate's documented no-network build. This gates the
+      # gap that --all-features hides: a helper used only by blocking-gated
+      # modules is dead under --no-default-features and otherwise only surfaces
+      # as a -D warnings failure here. (Added post-audit; see the bbox/SEC-104
+      # gating fix in 44192a2 for the regression this prevents.)
+      - name: Clippy (pure subset)
+        run: cargo clippy --no-default-features -- -D warnings
+      - name: Test (pure subset)
+        run: cargo test --no-default-features
+
   msrv:
     name: MSRV (1.88)
     runs-on: ubuntu-latest
