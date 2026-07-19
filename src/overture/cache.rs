@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use crate::cache_store::{CacheMeta as CacheMetaTrait, RawCache};
+use crate::cache_store::{CacheMeta as CacheMetaTrait, RawCache, to_hex};
 
 // ARC-102: `ThemePriority` is deprecated (never implemented; will be
 // removed in 0.3.0). Still imported so `OvertureParams::priority` and
@@ -33,6 +33,14 @@ const OVERTURE_CACHE_DEFAULT_TTL_SECS: u64 = 30 * 24 * 60 * 60;
 /// (ARC-001). `None` means "use the default ~30-day TTL"; `Some(0)` disables
 /// the cache (every fetch hits the CLI). Constructing via [`Default`] yields
 /// `None`, equivalent to the documented default.
+///
+/// QA-116: `Some(0)` disables **read-back** (every read misses and triggers
+/// a CLI re-fetch), but each fetch still writes its result to disk under the
+/// standard cache-write path. This is useful for refresh-only flows (always
+/// pull fresh data, but leave the on-disk entry in place for inspection or
+/// for a later non-zero-TTL run). A future release may additionally skip
+/// writes when the TTL is zero; the current behavior is documented, not
+/// load-bearing on any caller.
 ///
 /// # Examples
 ///
@@ -75,6 +83,9 @@ pub struct OvertureParams {
     /// (ARC-001). `None` selects the default ~30-day TTL; `Some(0)` disables
     /// the cache. Stored as seconds so the struct remains `Serialize`/`Deserialize`
     /// without an extra serde helper for `Duration`.
+    ///
+    /// QA-116: `Some(0)` disables read-back but fetches still write entries
+    /// (see the struct-level doc for the full caveat).
     #[serde(default)]
     pub cache_ttl_secs: Option<u64>,
 }
@@ -114,6 +125,9 @@ impl OvertureParams {
     /// `None` (the default) selects the documented ~30-day TTL. `Some(0)`
     /// disables the cache by yielding a zero-length TTL, which forces every
     /// read to miss. Any other `Some(secs)` is returned verbatim. ARC-001.
+    ///
+    /// QA-116: a zero TTL disables read-back only — writes still occur on
+    /// every fetch. See [`OvertureParams`] for the full caveat.
     pub fn cache_ttl(&self) -> Duration {
         match self.cache_ttl_secs {
             None => Duration::from_secs(OVERTURE_CACHE_DEFAULT_TTL_SECS),
@@ -195,7 +209,7 @@ pub fn overture_cache_key(bbox: (f64, f64, f64, f64), cli_type: &str) -> String 
     let (s, w, n, e) = bbox;
     let canonical = format!("overture|{s:.4},{w:.4},{n:.4},{e:.4}|{cli_type}");
     let hash = Sha256::digest(canonical.as_bytes());
-    hash.iter().map(|b| format!("{b:02x}")).collect()
+    to_hex(&hash)
 }
 
 /// Build a version-aware SHA-256 cache key (ARC-001).
@@ -221,7 +235,7 @@ pub fn overture_cache_key_with_version(
     };
     let canonical = format!("overture|v2|{version}|{s:.4},{w:.4},{n:.4},{e:.4}|{cli_type}");
     let hash = Sha256::digest(canonical.as_bytes());
-    hash.iter().map(|b| format!("{b:02x}")).collect()
+    to_hex(&hash)
 }
 
 /// Return cached GeoJSON for `key`, or `None` if absent, unreadable, or older

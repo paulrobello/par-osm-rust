@@ -7,7 +7,7 @@
 //! `parse_nd_ref`, `parse_member_attrs`) and the SEC-004 [`MAX_XML_DEPTH`]
 //! cap are private to this submodule.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
@@ -263,9 +263,16 @@ fn parse_osm_events<R: std::io::BufRead>(mut reader: Reader<R>) -> Result<OsmDat
     let mut cur_node_tags: HashMap<String, String> = HashMap::new();
 
     let mut in_way = false;
-    let mut current_way_id: i64 = 0;
+    // QA-101: `Option<i64>` so a missing/unparseable way id is detected at the
+    // way End event and the way skipped, rather than defaulted to 0 (which
+    // collided two id-less ways and tripped the `OsmData::new` invariant).
+    let mut current_way_id: Option<i64> = None;
     let mut current_tags: HashMap<String, String> = HashMap::new();
     let mut current_node_refs: Vec<i64> = Vec::new();
+    // QA-101: first-wins duplicate guard, lives across the whole parse so two
+    // `<way id="N">` elements in the same document do not both end up in the
+    // output (which would also trip the `ways`/`ways_by_id` invariant).
+    let mut seen_way_ids: HashSet<i64> = HashSet::new();
 
     let mut in_relation = false;
     let mut current_members: Vec<RelationMember> = Vec::new();
@@ -298,6 +305,11 @@ fn parse_osm_events<R: std::io::BufRead>(mut reader: Reader<R>) -> Result<OsmDat
                             min_lon = min_lon.min(lon);
                             max_lat = max_lat.max(lat);
                             max_lon = max_lon.max(lon);
+                            // QA-101: node duplicate handling is intentionally
+                            // last-wins (HashMap::insert overwrites). OSM
+                            // extracts legitimately repeat node ids across
+                            // ways; a duplicate node id with different coords
+                            // is upstream data damage, out of scope here.
                             nodes.insert(id, OsmNode { lat, lon });
                             in_node = true;
                             cur_lat = lat;
@@ -307,12 +319,14 @@ fn parse_osm_events<R: std::io::BufRead>(mut reader: Reader<R>) -> Result<OsmDat
                     }
                     b"way" => {
                         in_way = true;
+                        // QA-101: keep the Option; the way End event skips the
+                        // way if id is missing/unparseable, instead of defaulting
+                        // to 0 and colliding with other id-less ways.
                         current_way_id = e
                             .attributes()
                             .flatten()
                             .find(|a| a.key.as_ref() == b"id")
-                            .and_then(|a| xml_attr_parse::<i64>(&a))
-                            .unwrap_or(0);
+                            .and_then(|a| xml_attr_parse::<i64>(&a));
                         current_tags.clear();
                         current_node_refs.clear();
                     }
@@ -336,6 +350,8 @@ fn parse_osm_events<R: std::io::BufRead>(mut reader: Reader<R>) -> Result<OsmDat
                         min_lon = min_lon.min(lon);
                         max_lat = max_lat.max(lat);
                         max_lon = max_lon.max(lon);
+                        // QA-101: see the Start(b"node") arm — node-id duplicate
+                        // handling is last-wins by design.
                         nodes.insert(id, OsmNode { lat, lon });
                     }
                 }
@@ -369,26 +385,48 @@ fn parse_osm_events<R: std::io::BufRead>(mut reader: Reader<R>) -> Result<OsmDat
                 match e.name().as_ref() {
                     b"node" if in_node => {
                         in_node = false;
-                        if cur_node_tags
+                        // QA-104: classify first, then construct each surviving
+                        // entry once. A node can be both POI and addr; in that
+                        // case one clone is unavoidable (two OsmPoiNode entries
+                        // need the tag map) — clone for the first consumer and
+                        // `mem::take` for the last. If exactly one classification
+                        // fires, the tags move with zero clones.
+                        let is_poi = cur_node_tags
                             .keys()
-                            .any(|k| POI_TAG_KEYS.contains(&k.as_str()))
-                        {
+                            .any(|k| POI_TAG_KEYS.contains(&k.as_str()));
+                        let is_addr = cur_node_tags.contains_key("addr:housenumber");
+                        let is_tree =
+                            cur_node_tags.get("natural").map(|s| s.as_str()) == Some("tree");
+                        if is_poi && is_addr {
+                            let tags = std::mem::take(&mut cur_node_tags);
                             poi_nodes.push(OsmPoiNode {
                                 lat: cur_lat,
                                 lon: cur_lon,
-                                tags: cur_node_tags.clone(),
+                                tags: tags.clone(),
                                 source: FeatureSource::Osm,
                             });
-                        }
-                        if cur_node_tags.contains_key("addr:housenumber") {
                             addr_nodes.push(OsmPoiNode {
                                 lat: cur_lat,
                                 lon: cur_lon,
-                                tags: cur_node_tags.clone(),
+                                tags,
+                                source: FeatureSource::Osm,
+                            });
+                        } else if is_poi {
+                            poi_nodes.push(OsmPoiNode {
+                                lat: cur_lat,
+                                lon: cur_lon,
+                                tags: std::mem::take(&mut cur_node_tags),
+                                source: FeatureSource::Osm,
+                            });
+                        } else if is_addr {
+                            addr_nodes.push(OsmPoiNode {
+                                lat: cur_lat,
+                                lon: cur_lon,
+                                tags: std::mem::take(&mut cur_node_tags),
                                 source: FeatureSource::Osm,
                             });
                         }
-                        if cur_node_tags.get("natural").map(|s| s.as_str()) == Some("tree") {
+                        if is_tree {
                             tree_nodes.push(OsmNode {
                                 lat: cur_lat,
                                 lon: cur_lon,
@@ -397,20 +435,38 @@ fn parse_osm_events<R: std::io::BufRead>(mut reader: Reader<R>) -> Result<OsmDat
                     }
                     b"way" if in_way => {
                         in_way = false;
-                        let way = OsmWay {
-                            id: current_way_id,
-                            tags: current_tags.clone(),
-                            node_refs: current_node_refs.clone(),
-                        };
-                        ways.push(way);
+                        // QA-101: skip ways with missing/unparseable id, and
+                        // skip the second occurrence of any duplicate id
+                        // (first-wins, matching `OsmData::merge`'s policy).
+                        // Structured as a 3-way match so the post-event
+                        // `buf.clear()` always runs (no `continue`).
+                        match current_way_id {
+                            Some(id) if seen_way_ids.insert(id) => {
+                                // QA-104: `mem::take` avoids one HashMap + one
+                                // Vec deep-clone per way; the next way's Start
+                                // event clears the same buffers defensively
+                                // (cheap no-op after take).
+                                let way = OsmWay {
+                                    id,
+                                    tags: std::mem::take(&mut current_tags),
+                                    node_refs: std::mem::take(&mut current_node_refs),
+                                };
+                                ways.push(way);
+                            }
+                            Some(id) => log::warn!("skipping duplicate way id {id}"),
+                            None => log::warn!("skipping way with missing/invalid id"),
+                        }
                     }
                     b"relation" if in_relation => {
                         in_relation = false;
                         let rel_type = current_tags.get("type").map(|s| s.as_str());
                         if rel_type == Some("multipolygon") && !current_members.is_empty() {
+                            // QA-104: `mem::take` — relations fire on every
+                            // multipolygon end, so this removes one HashMap +
+                            // one Vec clone per relation.
                             relations.push(OsmRelation {
-                                tags: current_tags.clone(),
-                                members: current_members.clone(),
+                                tags: std::mem::take(&mut current_tags),
+                                members: std::mem::take(&mut current_members),
                             });
                         }
                     }

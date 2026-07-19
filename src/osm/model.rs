@@ -377,12 +377,16 @@ impl OsmData {
             lat >= min_lat && lat <= max_lat && lon >= min_lon && lon <= max_lon
         };
 
-        // Filter ways: keep if any node is inside the bbox. `ways[].id` is
-        // the source of truth (QA-021), so iterate `ways` directly and clone
-        // the survivors; `ways_by_id` is rebuilt from each kept way's `id`.
+        // Filter ways: keep if any node is inside the bbox. QA-106: take
+        // `self.ways` up front (moves the Vec out, leaving an empty Vec behind)
+        // so the borrow checker allows the `self.nodes.get(...)` lookup inside
+        // the loop body — iterating `&self.ways` while borrowing `self.nodes`
+        // is the constraint that forced the per-way `way.clone()` before. With
+        // the Vec owned locally, survivors move into `kept_ways` with no clone.
+        let ways = std::mem::take(&mut self.ways);
         let mut keep_node_ids: std::collections::HashSet<i64> = std::collections::HashSet::new();
         let mut kept_ways: Vec<OsmWay> = Vec::new();
-        for way in &self.ways {
+        for way in ways {
             let touches_bbox = way
                 .node_refs
                 .iter()
@@ -391,7 +395,7 @@ impl OsmData {
                 for id in &way.node_refs {
                     keep_node_ids.insert(*id);
                 }
-                kept_ways.push(way.clone());
+                kept_ways.push(way);
             }
         }
 

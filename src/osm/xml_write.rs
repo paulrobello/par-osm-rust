@@ -12,11 +12,26 @@ use crate::synthetic_ids::{
 use super::model::OsmData;
 
 fn escape_xml_attr(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('"', "&quot;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
+    // QA-114: single-pass escape into one pre-sized `String`. The prior
+    // chained `.replace()` allocated up to four intermediate Strings per
+    // attribute (one per `replace` call); this version allocates once and
+    // pushes each char's mapped entity (or the char itself) in place.
+    //
+    // The escape set mirrors the prior implementation exactly — `&`, `"`,
+    // `<`, `>` — and **intentionally excludes `'`** so the output stays
+    // byte-identical (the writer emits double-quoted attributes; apostrophes
+    // are not special there). Round-trip tests pin this.
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '"' => out.push_str("&quot;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 fn write_tags(xml: &mut String, tags: &HashMap<String, String>) {

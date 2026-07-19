@@ -12,6 +12,8 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use crate::osm::OsmData;
+// QA-107: truncation helpers consolidated in `crate::text_truncate`.
+use crate::text_truncate::{str_prefix_at_boundary, str_suffix_at_boundary};
 
 use super::cache::{
     OvertureParams, overture_cache_dir, overture_cache_key_with_version, overture_cache_read,
@@ -30,7 +32,7 @@ const OVERTURE_CLI_ENV_OVERRIDE: &str = "PAR_OSM_OVERTURE_CLI";
 const CLI_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
 const CLI_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
-const STDERR_SNIPPET_LIMIT: usize = 4096;
+const STDERR_SNIPPET_LIMIT: usize = crate::text_truncate::TRUNCATE_LIMIT;
 
 // ── CLI availability check ────────────────────────────────────────────────
 
@@ -157,22 +159,6 @@ fn stderr_suffix(stderr: &[u8]) -> String {
         let omitted = stderr.len().saturating_sub(head.len() + tail.len());
         format!(": {head}\n...[stderr truncated, {omitted} bytes omitted]...\n{tail}")
     }
-}
-
-fn str_prefix_at_boundary(s: &str, max_bytes: usize) -> &str {
-    let mut end = max_bytes.min(s.len());
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
-}
-
-fn str_suffix_at_boundary(s: &str, max_bytes: usize) -> &str {
-    let mut start = s.len().saturating_sub(max_bytes);
-    while !s.is_char_boundary(start) {
-        start += 1;
-    }
-    &s[start..]
 }
 
 fn read_stderr_file(stderr_path: &Path, cli_type: &str) -> Result<Vec<u8>> {
@@ -408,6 +394,10 @@ fn fetch_one_theme(
             log::debug!("Overture cache miss for {cli_type} — downloading");
             let fetched = fetch_geojson_for_type(cli_type, bbox, params.timeout_secs)
                 .with_context(|| format!("fetching Overture data for type '{cli_type}'"))?;
+            // QA-116: the write happens unconditionally, even when
+            // `params.cache_ttl()` is zero (which only disables read-back).
+            // Documented behavior — useful for refresh-only flows; a future
+            // release may skip writes on zero TTL.
             overture_cache_write(cache_dir, &key, bbox, cli_type, cli_version, &fetched)
                 .with_context(|| format!("caching Overture data for type '{cli_type}'"))?;
             fetched

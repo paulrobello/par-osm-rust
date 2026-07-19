@@ -213,15 +213,24 @@ pub(crate) fn parse_overture_geojson_with_allocator(
                     )
                 {
                     nodes.insert(id, node);
-                    let poi = OsmPoiNode {
-                        lat: node.lat,
-                        lon: node.lon,
-                        tags: tags.clone(),
-                        source: FeatureSource::Overture,
-                    };
+                    // QA-110: build `OsmPoiNode` only inside the arms that
+                    // actually push it (Address / Place). The Base/Land `_`
+                    // arm used to construct poi with `tags.clone()` and then
+                    // drop it unused; that deep clone fired on every Base
+                    // point feature.
                     match theme {
-                        OvertureTheme::Address => addr_nodes.push(poi),
-                        OvertureTheme::Place => poi_nodes.push(poi),
+                        OvertureTheme::Address => addr_nodes.push(OsmPoiNode {
+                            lat: node.lat,
+                            lon: node.lon,
+                            tags: tags.clone(),
+                            source: FeatureSource::Overture,
+                        }),
+                        OvertureTheme::Place => poi_nodes.push(OsmPoiNode {
+                            lat: node.lat,
+                            lon: node.lon,
+                            tags: tags.clone(),
+                            source: FeatureSource::Overture,
+                        }),
                         _ => {
                             // Decorative tree nodes from land theme
                             if tags.get("natural").map(|s| s.as_str()) == Some("tree") {

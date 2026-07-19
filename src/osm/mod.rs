@@ -1068,4 +1068,159 @@ mod tests {
             "expected path in error chain, got: {full}"
         );
     }
+
+    // ────────────────────────────────────────────────────────────────────
+    // QA-101: duplicate / missing way-id handling at the parse boundary.
+    // The parser must skip-and-warn (not panic the `OsmData::new` debug
+    // invariant, not silently collide on id 0). First occurrence wins for
+    // duplicates, matching `OsmData::merge`.
+    // ────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_xml_skips_duplicate_way_id_keeping_first() {
+        let xml = r#"<?xml version="1.0"?>
+<osm version="0.6">
+  <node id="1" lat="0.0" lon="0.0"/>
+  <node id="2" lat="0.0" lon="0.1"/>
+  <way id="10">
+    <nd ref="1"/>
+    <nd ref="2"/>
+    <tag k="highway" v="residential"/>
+    <tag k="name" v="First"/>
+  </way>
+  <way id="10">
+    <nd ref="1"/>
+    <nd ref="2"/>
+    <tag k="highway" v="primary"/>
+    <tag k="name" v="Second"/>
+  </way>
+</osm>"#;
+        let data = parse_osm_xml_str(xml).expect("parse must succeed");
+        // Debug invariant (would have panicked pre-QA-101 with two ways at
+        // id 10 colliding in ways_by_id).
+        data.validate_invariants().expect("invariants hold");
+        // Exactly one way survived; it is the FIRST occurrence.
+        assert_eq!(data.ways.len(), 1);
+        assert_eq!(data.ways[0].id, 10);
+        assert_eq!(data.ways[0].tags["name"], "First");
+        assert_eq!(data.ways[0].tags["highway"], "residential");
+    }
+
+    #[test]
+    fn parse_xml_skips_way_with_missing_id_and_keeps_nodes() {
+        // No `id` attribute on the way → skip the way entirely. Surrounding
+        // nodes must still be registered.
+        let xml = r#"<?xml version="1.0"?>
+<osm version="0.6">
+  <node id="1" lat="0.0" lon="0.0"/>
+  <node id="2" lat="0.0" lon="0.1"/>
+  <way>
+    <nd ref="1"/>
+    <nd ref="2"/>
+    <tag k="highway" v="residential"/>
+  </way>
+  <way id="30">
+    <nd ref="1"/>
+    <tag k="highway" v="track"/>
+  </way>
+</osm>"#;
+        let data = parse_osm_xml_str(xml).expect("parse must succeed");
+        data.validate_invariants().expect("invariants hold");
+        // Both nodes retained (way skip does not prune nodes).
+        assert_eq!(data.nodes.len(), 2);
+        // Only the way with an id survived.
+        assert_eq!(data.ways.len(), 1);
+        assert_eq!(data.ways[0].id, 30);
+    }
+
+    #[test]
+    fn parse_xml_skips_way_with_unparseable_id() {
+        // Non-numeric `id` parses to None → same skip path as missing id.
+        let xml = r#"<?xml version="1.0"?>
+<osm version="0.6">
+  <node id="1" lat="0.0" lon="0.0"/>
+  <way id="not-a-number">
+    <nd ref="1"/>
+  </way>
+</osm>"#;
+        let data = parse_osm_xml_str(xml).expect("parse must succeed");
+        data.validate_invariants().expect("invariants hold");
+        assert_eq!(data.nodes.len(), 1);
+        assert!(data.ways.is_empty());
+    }
+
+    #[test]
+    fn parse_xml_accepts_explicit_zero_way_id() {
+        // The XML parser distinguishes "id attribute absent" (skip) from
+        // "id attribute present with value 0" (accept — it is a legitimate,
+        // if unusual, OSM id). PBF cannot make this distinction at the wire
+        // level (its id field defaults to 0 when absent), so the PBF parser
+        // treats id==0 as missing; this test pins the XML side explicitly.
+        let xml = r#"<?xml version="1.0"?>
+<osm version="0.6">
+  <node id="1" lat="0.0" lon="0.0"/>
+  <way id="0">
+    <nd ref="1"/>
+  </way>
+</osm>"#;
+        let data = parse_osm_xml_str(xml).expect("parse must succeed");
+        data.validate_invariants().expect("invariants hold");
+        assert_eq!(data.ways.len(), 1);
+        assert_eq!(data.ways[0].id, 0);
+    }
+
+    #[test]
+    fn parse_osm_xml_file_skips_duplicate_way_id_on_streaming_path() {
+        use std::io::Write;
+        let xml = r#"<?xml version="1.0"?>
+<osm version="0.6">
+  <node id="1" lat="0.0" lon="0.0"/>
+  <node id="2" lat="0.0" lon="0.1"/>
+  <way id="10">
+    <nd ref="1"/>
+    <nd ref="2"/>
+    <tag k="name" v="First"/>
+  </way>
+  <way id="10">
+    <nd ref="1"/>
+    <tag k="name" v="Second"/>
+  </way>
+</osm>"#;
+        let mut tmp = tempfile::Builder::new()
+            .suffix(".osm")
+            .tempfile()
+            .expect("tempfile creation");
+        tmp.write_all(xml.as_bytes()).expect("write fixture");
+        let (_, path) = tmp.into_parts();
+
+        let data = parse_osm_xml_file(&path).expect("streaming parse");
+        data.validate_invariants().expect("invariants hold");
+        assert_eq!(data.ways.len(), 1);
+        assert_eq!(data.ways[0].id, 10);
+        assert_eq!(data.ways[0].tags["name"], "First");
+    }
+
+    #[test]
+    fn parse_osm_xml_file_skips_way_with_missing_id_on_streaming_path() {
+        use std::io::Write;
+        let xml = r#"<?xml version="1.0"?>
+<osm version="0.6">
+  <node id="1" lat="0.0" lon="0.0"/>
+  <way>
+    <nd ref="1"/>
+    <tag k="highway" v="residential"/>
+  </way>
+</osm>"#;
+        let mut tmp = tempfile::Builder::new()
+            .suffix(".osm")
+            .tempfile()
+            .expect("tempfile creation");
+        tmp.write_all(xml.as_bytes()).expect("write fixture");
+        let (_, path) = tmp.into_parts();
+
+        let data = parse_osm_xml_file(&path).expect("streaming parse");
+        data.validate_invariants().expect("invariants hold");
+        assert_eq!(data.nodes.len(), 1);
+        assert!(data.ways.is_empty());
+    }
 }

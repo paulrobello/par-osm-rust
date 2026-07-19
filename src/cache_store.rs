@@ -62,6 +62,26 @@ pub trait CacheMeta: Serialize + DeserializeOwned {
     fn created_at(&self) -> DateTime<Utc>;
 }
 
+/// Lowercase-hex-encode a byte slice into a single pre-sized `String`.
+///
+/// QA-113: shared by the Overpass and Overture cache-key functions
+/// (`osm_cache::overpass_cache_key(_with_url)`,
+/// `overture::cache::overture_cache_key(_with_version)`). The four sites
+/// previously did `hash.iter().map(|b| format!("{b:02x}")).collect()`, which
+/// allocates one fresh `String` per byte (32 allocations per SHA-256 digest);
+/// this version allocates the result `String` once with the exact capacity
+/// and writes each byte's two hex digits with no intermediate allocation.
+pub(crate) fn to_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        // `write!` on a `String` is infallible and performs no extra
+        // allocation when the string has spare capacity.
+        let _ = write!(out, "{b:02x}");
+    }
+    out
+}
+
 /// Generic raw-payload disk cache (QA-003).
 ///
 /// Stores `{key}.{ext}` data files paired with `{key}.meta.json` sidecars in
@@ -112,15 +132,6 @@ impl<Meta: CacheMeta> RawCache<Meta> {
 
     fn meta_path(&self, key: &str) -> PathBuf {
         self.dir.join(format!("{key}.meta.json"))
-    }
-
-    fn data_tmp(&self, key: &str) -> PathBuf {
-        self.dir
-            .join(format!("{key}.{ext}.tmp", ext = self.data_ext))
-    }
-
-    fn meta_tmp(&self, key: &str) -> PathBuf {
-        self.dir.join(format!("{key}.meta.json.tmp"))
     }
 
     /// Read the data payload for `key`, or `None` if the data file is absent
@@ -176,11 +187,22 @@ impl<Meta: CacheMeta> RawCache<Meta> {
     /// miss — never the inverse orphan (data-without-meta) that the prior
     /// protocol could leave behind.
     ///
+    /// QA-108: each temp file is a `tempfile::NamedTempFile::new_in(&self.dir)`
+    /// with a process-unique random name, then `persist`d (same-directory
+    /// rename) to its final path. The random name closes the concurrent-writer
+    /// race the prior deterministic `{key}.{ext}.tmp` path had (two processes
+    /// writing the same key interleaved bytes on the shared tmp file); the
+    /// same-directory creation keeps the persist a same-filesystem rename, so
+    /// the atomicity the QA-012 protocol depends on is preserved. The
+    /// meta-first/data-last ordering is unchanged.
+    ///
     /// # Errors
     ///
     /// Returns `Err` if `key` fails the `[0-9a-zA-Z_-]` alphabet check
     /// (SEC-105), if `meta` cannot be serialized, or if any I/O step fails.
     pub fn write(&self, key: &str, data: &str, meta: &Meta) -> Result<()> {
+        use std::io::Write;
+
         // SEC-105: validate up front so an invalid key never reaches the
         // filesystem. Returning Err (rather than silently no-oping) surfaces
         // the contract violation loudly on the write path.
@@ -190,18 +212,21 @@ impl<Meta: CacheMeta> RawCache<Meta> {
         // sidecar on disk.
         let meta_json = serde_json::to_string(meta)?;
 
-        // 1. Meta first: temp + rename to final path.
-        let meta_tmp = self.meta_tmp(key);
+        // 1. Meta first: NamedTempFile + persist (atomic same-directory
+        //    rename) to the final path. `persist` consumes the handle, so on
+        //    success no cleanup is needed; on failure the NamedTempFile Drop
+        //    removes the temp file.
         let meta_path = self.meta_path(key);
-        std::fs::write(&meta_tmp, &meta_json)?;
-        std::fs::rename(&meta_tmp, &meta_path)?;
+        let mut meta_tmp = tempfile::NamedTempFile::new_in(&self.dir)?;
+        meta_tmp.write_all(meta_json.as_bytes())?;
+        meta_tmp.persist(&meta_path)?;
 
-        // 2. Data last: temp + rename to final path. This is the commit point
-        //    — only after this rename are both files visible together.
-        let data_tmp = self.data_tmp(key);
+        // 2. Data last: NamedTempFile + persist. This is the commit point —
+        //    only after this rename are both files visible together.
         let data_path = self.data_path(key);
-        std::fs::write(&data_tmp, data)?;
-        std::fs::rename(&data_tmp, &data_path)?;
+        let mut data_tmp = tempfile::NamedTempFile::new_in(&self.dir)?;
+        data_tmp.write_all(data.as_bytes())?;
+        data_tmp.persist(&data_path)?;
 
         Ok(())
     }
@@ -497,5 +522,30 @@ mod tests {
         let meta = sample_meta();
         cache.write(key, "<osm/>", &meta).expect("write");
         assert_eq!(cache.read_data(key).as_deref(), Some("<osm/>"));
+    }
+
+    // ── QA-113: shared to_hex helper ───────────────────────────────────────
+
+    #[test]
+    fn to_hex_encodes_known_sha256_digest() {
+        use sha2::Digest;
+        // SHA-256("hello") = 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
+        // (verified against `echo -n hello | sha256sum` on a standard system).
+        let digest = sha2::Sha256::digest(b"hello");
+        assert_eq!(
+            to_hex(&digest),
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
+    }
+
+    #[test]
+    fn to_hex_handles_empty_input() {
+        assert_eq!(to_hex(&[]), "");
+    }
+
+    #[test]
+    fn to_hex_lowercase_and_two_chars_per_byte() {
+        // Each byte maps to exactly two lowercase hex digits.
+        assert_eq!(to_hex(&[0x00, 0x0f, 0x10, 0xff, 0xab]), "000f10ffab");
     }
 }

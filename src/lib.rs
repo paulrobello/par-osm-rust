@@ -64,6 +64,11 @@
 // `cargo clippy -- -D warnings`, so the gate stays green by construction.
 #![warn(missing_docs)]
 
+// SEC-104: shared bbox-validation helper used by `overpass` and `srtm`
+// (both blocking-only). Feature-gated to `blocking` so the pure
+// --no-default-features build does not emit a dead-code warning for the
+// otherwise-unused helper (its only callers are blocking-gated modules).
+#[cfg(feature = "blocking")]
 pub(crate) mod bbox;
 pub mod cache;
 pub mod cache_store;
@@ -79,3 +84,10 @@ pub mod sources;
 #[cfg(feature = "blocking")]
 pub mod srtm;
 pub mod synthetic_ids;
+// QA-107: shared byte-boundary-safe truncation helpers used by `overpass`
+// (error-body clipping) and `overture::cli` (stderr clipping). Crate-private
+// so the public API is unchanged. Feature-gated to `blocking` because both
+// call sites are blocking-only — without the feature the module would
+// otherwise emit dead-code warnings.
+#[cfg(feature = "blocking")]
+pub(crate) mod text_truncate;

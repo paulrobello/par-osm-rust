@@ -4,7 +4,7 @@
 //! `ElementReader` (backed by `BlobReader` over a `BufReader` — buffered I/O,
 //! not memory-mapped) and folds its elements into an [`OsmData`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -118,6 +118,10 @@ pub fn parse_pbf(path: &Path) -> Result<OsmData> {
     let mut min_lon = f64::MAX;
     let mut max_lat = f64::MIN;
     let mut max_lon = f64::MIN;
+    // QA-101: first-wins duplicate guard, lives across the whole parse so two
+    // ways with the same OSM id in the same PBF file do not both end up in the
+    // output (which would trip the `OsmData::new` ways/ways_by_id invariant).
+    let mut seen_way_ids: HashSet<i64> = HashSet::new();
 
     reader
         .for_each(|element| match element {
@@ -162,15 +166,35 @@ pub fn parse_pbf(path: &Path) -> Result<OsmData> {
                 );
             }
             Element::Way(w) => {
+                let id = w.id();
+                // QA-101: identical policy to the XML parser. PBF's `Way::id`
+                // returns the protobuf field directly (always an i64); the
+                // protobuf default for an absent field is 0, which we treat
+                // as "missing/invalid" — OSM's id allocator never issues 0,
+                // and two id-less ways colliding on 0 is exactly the bug this
+                // guard prevents. `seen_way_ids` then handles real duplicates
+                // from concatenated extracts (first-wins, matching
+                // `OsmData::merge`).
+                if id == 0 {
+                    log::warn!("skipping way with missing/invalid id");
+                    return;
+                }
+                if !seen_way_ids.insert(id) {
+                    log::warn!("skipping duplicate way id {id}");
+                    return;
+                }
                 let tags: HashMap<String, String> = w
                     .tags()
                     .map(|(k, v)| (k.to_string(), v.to_string()))
                     .collect();
                 let node_refs: Vec<i64> = w.refs().collect();
+                // QA-103: move both locals — they are not reused after
+                // construction; the previous `tags.clone()` / `node_refs.clone()`
+                // was pure waste on the PBF hot path.
                 let way = OsmWay {
-                    id: w.id(),
-                    tags: tags.clone(),
-                    node_refs: node_refs.clone(),
+                    id,
+                    tags,
+                    node_refs,
                 };
                 ways.push(way);
             }

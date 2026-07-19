@@ -309,14 +309,25 @@ pub fn merge_source_data(
     overture_data: Option<OsmData>,
     poi_source_mode: PoiSourceMode,
 ) -> SourceFetchResult {
-    let original_osm_pois = osm_data.poi_nodes.clone();
+    // QA-105: no global `original_osm_pois` clone here — only the
+    // (Both, Some) and (OverturePreferred, Some-nonempty) arms actually need
+    // the pre-merge OSM POIs (to build `all_pois` for dedupe). The four None
+    // arms never touch Overture POIs, the (OsmOnly, Some) arm clears
+    // Overture POIs before merging so `osm_data.poi_nodes` is unchanged by
+    // the merge, and the (OverturePreferred, Some-empty) arm reaches its
+    // match arm only when Overture POIs are already empty (same no-op merge).
+    // Cloning locally in the two arms that need it removes a deep clone on
+    // every other call.
     let mut warnings = Vec::new();
 
     match (poi_source_mode, overture_data) {
         (PoiSourceMode::OsmOnly, Some(mut overture)) => {
+            // OsmOnly drops Overture POIs; clear before merge so the
+            // subsequent `osm_data.merge(overture)` cannot extend
+            // `osm_data.poi_nodes`. No `original_osm_pois` restore is needed
+            // because the merge's poi_nodes extend is now a no-op.
             overture.poi_nodes.clear();
             osm_data.merge(overture);
-            osm_data.poi_nodes = original_osm_pois;
             SourceFetchResult {
                 data: osm_data,
                 status: SourceStatus::OsmOnly,
@@ -329,9 +340,9 @@ pub fn merge_source_data(
             warnings,
         },
         (PoiSourceMode::OvertureOnly, Some(mut overture)) => {
-            let overture_pois = overture.poi_nodes.clone();
+            // QA-105: take Overture POIs in one pass (was clone + clear).
+            let overture_pois = std::mem::take(&mut overture.poi_nodes);
             osm_data.poi_nodes = overture_pois;
-            overture.poi_nodes.clear();
             osm_data.merge(overture);
             SourceFetchResult {
                 data: osm_data,
@@ -349,9 +360,10 @@ pub fn merge_source_data(
             }
         }
         (PoiSourceMode::Both, Some(mut overture)) => {
-            let mut all_pois = original_osm_pois;
-            all_pois.extend(overture.poi_nodes.clone());
-            overture.poi_nodes.clear();
+            // QA-105: local clone of OSM POIs (only this arm + the
+            // OverturePreferred non-empty arm need it); take Overture POIs.
+            let mut all_pois = osm_data.poi_nodes.clone();
+            all_pois.extend(std::mem::take(&mut overture.poi_nodes));
             osm_data.merge(overture);
             osm_data.poi_nodes = dedupe_pois_with_overture_preference(all_pois);
             SourceFetchResult {
@@ -371,9 +383,9 @@ pub fn merge_source_data(
         (PoiSourceMode::OverturePreferred, Some(mut overture))
             if !overture.poi_nodes.is_empty() =>
         {
-            let mut all_pois = original_osm_pois;
-            all_pois.extend(overture.poi_nodes.clone());
-            overture.poi_nodes.clear();
+            // QA-105: same shape as (Both, Some) above.
+            let mut all_pois = osm_data.poi_nodes.clone();
+            all_pois.extend(std::mem::take(&mut overture.poi_nodes));
             osm_data.merge(overture);
             osm_data.poi_nodes = dedupe_pois_with_overture_preference(all_pois);
             SourceFetchResult {
@@ -383,10 +395,11 @@ pub fn merge_source_data(
             }
         }
         (PoiSourceMode::OverturePreferred, Some(mut overture)) => {
+            // Guard above guarantees `overture.poi_nodes.is_empty()`, so the
+            // merge cannot extend `osm_data.poi_nodes` — no restore needed.
             warnings.push("Overture returned no POIs; using OSM POIs only".to_string());
             overture.poi_nodes.clear();
             osm_data.merge(overture);
-            osm_data.poi_nodes = original_osm_pois;
             SourceFetchResult {
                 data: osm_data,
                 status: SourceStatus::OvertureFallbackToOsm,

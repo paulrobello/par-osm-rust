@@ -10,6 +10,8 @@ use url::Url;
 
 use crate::filter::FeatureFilter;
 use crate::osm::OsmData;
+// QA-107: truncation helpers consolidated in `crate::text_truncate`.
+use crate::text_truncate::{str_prefix_at_boundary, str_suffix_at_boundary};
 
 const DEFAULT_OVERPASS_URL: &str = "https://overpass-api.de/api/interpreter";
 const OVERPASS_TIMEOUT_SECS: u64 = 60;
@@ -194,7 +196,7 @@ pub fn build_overpass_query(bbox: (f64, f64, f64, f64), filter: &FeatureFilter) 
 /// surfaced into the `anyhow` error message. Mirrors `STDERR_SNIPPET_LIMIT`
 /// in `src/overture.rs` — keeps error messages bounded if a mirror returns a
 /// large error body.
-const ERROR_BODY_LIMIT: usize = 4096;
+const ERROR_BODY_LIMIT: usize = crate::text_truncate::TRUNCATE_LIMIT;
 
 /// Truncate an Overpass error response body to [`ERROR_BODY_LIMIT`] bytes,
 /// splitting across head and tail at char boundaries. Mirrors the
@@ -214,22 +216,6 @@ fn truncate_error_body(body: &[u8]) -> String {
         let omitted = body.len().saturating_sub(head.len() + tail.len());
         format!("{head}\n...[body truncated, {omitted} bytes omitted]...\n{tail}")
     }
-}
-
-fn str_prefix_at_boundary(s: &str, max_bytes: usize) -> &str {
-    let mut end = max_bytes.min(s.len());
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
-}
-
-fn str_suffix_at_boundary(s: &str, max_bytes: usize) -> &str {
-    let mut start = s.len().saturating_sub(max_bytes);
-    while !s.is_char_boundary(start) {
-        start += 1;
-    }
-    &s[start..]
 }
 
 /// Lazily-initialized shared `reqwest::blocking::Client` for Overpass requests.

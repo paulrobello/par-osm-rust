@@ -222,6 +222,16 @@ fn migrate_legacy_cache_dir(subdir: &str) -> Result<CacheMigrationReport> {
         report.skipped_files = legacy_file_count(&legacy_dir)?;
         return Ok(report);
     }
+    // QA-109: overture is exempt from the "shared dir non-empty → skip
+    // migration" guard that overpass and srtm enforce. The overture cache
+    // is keyed by `(bbox, theme, CLI version)` and accumulates entries across
+    // releases, so a populated shared dir is the normal steady state, not a
+    // sign that migration already ran. Skipping on non-empty would leave
+    // legitimate legacy entries stranded. overpass/srtm, by contrast, key on
+    // a single in-flight URL/tile per slot, so a non-empty shared dir means
+    // migration already happened and re-running would duplicate work. The
+    // asymmetry is intentional; see commit d6b224c ("fix: merge legacy
+    // overture cache files") for the original decision.
 
     for entry in fs::read_dir(&legacy_dir)
         .with_context(|| format!("reading legacy cache dir {}", legacy_dir.display()))?
