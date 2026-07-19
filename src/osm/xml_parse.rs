@@ -283,6 +283,15 @@ fn parse_osm_events<R: std::io::BufRead>(mut reader: Reader<R>) -> Result<OsmDat
 
     let mut in_relation = false;
     let mut current_members: Vec<RelationMember> = Vec::new();
+    // ARC-113: `Option<i64>` so a missing/unparseable relation id is detected
+    // at the relation End event and the relation skipped, matching QA-101's
+    // way-id policy. A relation without an id cannot be usefully referenced
+    // downstream (cache keys, dedupe, round-trip), so skip-with-warn is the
+    // posture. First-wins duplicate guard lives across the whole parse so two
+    // `<relation id="N">` elements in the same document do not both end up in
+    // the output.
+    let mut current_relation_id: Option<i64> = None;
+    let mut seen_relation_ids: HashSet<i64> = HashSet::new();
 
     let mut depth: usize = 0;
 
@@ -341,6 +350,15 @@ fn parse_osm_events<R: std::io::BufRead>(mut reader: Reader<R>) -> Result<OsmDat
                         in_relation = true;
                         current_tags.clear();
                         current_members.clear();
+                        // ARC-113: keep the Option; the relation End event
+                        // skips the relation if id is missing/unparseable,
+                        // instead of defaulting to 0 and colliding with other
+                        // id-less relations.
+                        current_relation_id = e
+                            .attributes()
+                            .flatten()
+                            .find(|a| a.key.as_ref() == b"id")
+                            .and_then(|a| xml_attr_parse::<i64>(&a));
                     }
                     _ => {}
                 }
@@ -468,13 +486,30 @@ fn parse_osm_events<R: std::io::BufRead>(mut reader: Reader<R>) -> Result<OsmDat
                         in_relation = false;
                         let rel_type = current_tags.get("type").map(|s| s.as_str());
                         if rel_type == Some("multipolygon") && !current_members.is_empty() {
-                            // QA-104: `mem::take` — relations fire on every
-                            // multipolygon end, so this removes one HashMap +
-                            // one Vec clone per relation.
-                            relations.push(OsmRelation {
-                                tags: std::mem::take(&mut current_tags),
-                                members: std::mem::take(&mut current_members),
-                            });
+                            // ARC-113: skip relations with missing/unparseable
+                            // id (mirroring QA-101's way-id policy), and skip
+                            // the second occurrence of any duplicate id
+                            // (first-wins). A relation without an id cannot be
+                            // usefully referenced downstream. Structured as a
+                            // 3-way match so the post-event `buf.clear()`
+                            // always runs (no `continue`).
+                            match current_relation_id {
+                                Some(id) if seen_relation_ids.insert(id) => {
+                                    relations.push(OsmRelation {
+                                        id,
+                                        tags: std::mem::take(&mut current_tags),
+                                        members: std::mem::take(&mut current_members),
+                                    });
+                                }
+                                Some(id) => {
+                                    log::warn!("skipping duplicate relation id {id}")
+                                }
+                                None => {
+                                    log::warn!(
+                                        "skipping relation with missing/invalid id"
+                                    )
+                                }
+                            }
                         }
                     }
                     _ => {}

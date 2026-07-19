@@ -201,6 +201,15 @@ pub fn parse_pbf(path: &Path) -> Result<OsmData> {
             Element::Relation(r) => {
                 let rel_type = r.tags().find(|(k, _)| *k == "type").map(|(_, v)| v);
                 if rel_type == Some("multipolygon") {
+                    // ARC-113: skip relations with missing/invalid id (id == 0
+                    // in PBF indicates an absent protobuf field, mirroring the
+                    // QA-101 way-id policy). A relation without an id cannot
+                    // be usefully referenced downstream.
+                    let id = r.id();
+                    if id == 0 {
+                        log::warn!("skipping relation with missing/invalid id");
+                        return;
+                    }
                     let tags: HashMap<String, String> = r
                         .tags()
                         .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -219,7 +228,7 @@ pub fn parse_pbf(path: &Path) -> Result<OsmData> {
                         })
                         .collect();
                     if !members.is_empty() {
-                        relations.push(OsmRelation { tags, members });
+                        relations.push(OsmRelation { id, tags, members });
                     }
                 }
             }

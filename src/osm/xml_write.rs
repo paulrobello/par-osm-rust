@@ -146,8 +146,17 @@ pub fn write_osm_xml_string(data: &OsmData) -> String {
         xml.push_str("  </way>\n");
     }
 
+    // ARC-113: emit the relation's own OSM id when present. The synthetic
+    // `writer_relation_id(idx)` fallback remains for id-less synthetic
+    // relations (e.g. allocator-issued or externally-constructed data that
+    // never carried an id); `validate_invariants` is the real guard against
+    // drift between `relations[].id` and any consumer that assumes a real id.
     for (idx, relation) in data.relations.iter().enumerate() {
-        let relation_id = writer_relation_id(idx);
+        let relation_id = if relation.id != 0 {
+            relation.id
+        } else {
+            writer_relation_id(idx)
+        };
         xml.push_str(&format!("  <relation id=\"{}\">\n", relation_id));
         for member in &relation.members {
             xml.push_str(&format!(

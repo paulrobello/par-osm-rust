@@ -351,6 +351,7 @@ fn clip_to_bbox_keeps_only_ways_touching_the_bbox_and_bounds_nodes() {
         // Attach a relation referencing the outside way; it must be pruned
         // because its only member way is outside the clip bbox.
         .with_relations(vec![OsmRelation {
+            id: 999,
             tags: HashMap::from([("type".to_string(), "multipolygon".to_string())]),
             members: vec![RelationMember {
                 way_id: 2,
@@ -452,6 +453,7 @@ fn merge_combines_ways_and_relations_from_both_sources() {
             node_refs: vec![1],
         }])
         .with_relations(vec![OsmRelation {
+            id: 1000,
             tags: HashMap::from([("type".to_string(), "multipolygon".to_string())]),
             members: vec![RelationMember {
                 way_id: 100,
@@ -467,6 +469,7 @@ fn merge_combines_ways_and_relations_from_both_sources() {
             node_refs: vec![2],
         }])
         .with_relations(vec![OsmRelation {
+            id: 2000,
             tags: HashMap::from([("type".to_string(), "multipolygon".to_string())]),
             members: vec![RelationMember {
                 way_id: 200,

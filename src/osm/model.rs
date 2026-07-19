@@ -94,6 +94,12 @@ pub struct RelationMember {
 /// An OSM relation: a collection of ways with roles and tags.
 #[derive(Debug, Clone)]
 pub struct OsmRelation {
+    /// The relation's own OSM identifier (ARC-113, 0.3.0). Mirrors
+    /// [`OsmWay::id`]: populated by the parsers from the `<relation id="…">`
+    /// attribute (XML) or the PBF `Relation::id` field; emitted by
+    /// [`crate::osm::write_osm_xml_string`] when present, with a synthetic
+    /// fallback for id-less synthetic relations.
+    pub id: i64,
     /// Free-form OSM tags on the relation (must include `type=multipolygon`
     /// for the parser to retain it).
     pub tags: HashMap<String, String>,

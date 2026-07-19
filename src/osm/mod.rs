@@ -144,9 +144,94 @@ mod tests {
 </osm>"#;
         let data = parse_osm_xml_str(xml).unwrap();
         assert_eq!(data.relations.len(), 1);
+        // ARC-113: parser now populates `OsmRelation::id` from the
+        // `<relation id="…">` attribute.
+        assert_eq!(data.relations[0].id, 200);
         assert_eq!(data.relations[0].members[0].way_id, 100);
         assert_eq!(data.relations[0].members[0].role, "outer");
         assert_eq!(data.relations[0].tags["landuse"], "park");
+    }
+
+    #[test]
+    fn parse_xml_skips_relation_with_missing_id() {
+        // ARC-113: a relation without an `id` attribute is skipped with a
+        // warning (mirroring QA-101's way-id policy) rather than defaulted
+        // to 0 and colliding with other id-less relations.
+        let xml = r#"<?xml version="1.0"?>
+<osm version="0.6">
+  <node id="1" lat="0.0" lon="0.0"/>
+  <way id="100">
+    <nd ref="1"/>
+  </way>
+  <relation>
+    <member type="way" ref="100" role="outer"/>
+    <tag k="type" v="multipolygon"/>
+  </relation>
+</osm>"#;
+        let data = parse_osm_xml_str(xml).unwrap();
+        assert!(
+            data.relations.is_empty(),
+            "id-less relation must be skipped (ARC-113)"
+        );
+    }
+
+    #[test]
+    fn parse_xml_skips_duplicate_relation_id() {
+        // ARC-113: first-wins on duplicate relation ids in the same document
+        // (mirrors the way-id policy).
+        let xml = r#"<?xml version="1.0"?>
+<osm version="0.6">
+  <node id="1" lat="0.0" lon="0.0"/>
+  <way id="100">
+    <nd ref="1"/>
+  </way>
+  <relation id="500">
+    <member type="way" ref="100" role="outer"/>
+    <tag k="type" v="multipolygon"/>
+    <tag k="name" v="first"/>
+  </relation>
+  <relation id="500">
+    <member type="way" ref="100" role="outer"/>
+    <tag k="type" v="multipolygon"/>
+    <tag k="name" v="second"/>
+  </relation>
+</osm>"#;
+        let data = parse_osm_xml_str(xml).unwrap();
+        assert_eq!(data.relations.len(), 1);
+        assert_eq!(data.relations[0].id, 500);
+        assert_eq!(data.relations[0].tags["name"], "first");
+    }
+
+    #[test]
+    fn relation_id_survives_parse_write_parse_round_trip() {
+        // ARC-113 round-trip: the relation's OSM id must survive the
+        // parse→write→parse cycle (writer emits the real id when present,
+        // parser re-reads it from the emitted XML).
+        let xml = r#"<?xml version="1.0"?>
+<osm version="0.6">
+  <node id="1" lat="0.0" lon="0.0"/>
+  <way id="100">
+    <nd ref="1"/>
+  </way>
+  <relation id="123456789">
+    <member type="way" ref="100" role="outer"/>
+    <tag k="type" v="multipolygon"/>
+    <tag k="landuse" v="park"/>
+  </relation>
+</osm>"#;
+        let first = parse_osm_xml_str(xml).unwrap();
+        assert_eq!(first.relations[0].id, 123456789);
+
+        let written = write_osm_xml_string(&first);
+        assert!(
+            written.contains("<relation id=\"123456789\">"),
+            "writer must emit the real relation id: {written}"
+        );
+
+        let second = parse_osm_xml_str(&written).unwrap();
+        assert_eq!(second.relations.len(), 1);
+        assert_eq!(second.relations[0].id, 123456789);
+        assert_eq!(second.relations[0].tags["landuse"], "park");
     }
 
     #[test]
@@ -331,6 +416,7 @@ mod tests {
                 },
             ],
             vec![OsmRelation {
+                id: 500,
                 tags: HashMap::from([
                     ("type".to_string(), "multipolygon".to_string()),
                     ("name".to_string(), "A&B Park".to_string()),
@@ -353,11 +439,14 @@ mod tests {
         );
 
         let xml = write_osm_xml_string(&data);
-        assert!(xml.contains("<relation id=\"-7000000000\">"));
+        // ARC-113: the writer now emits the relation's own OSM id (`500`)
+        // rather than the synthetic `writer_relation_id(0)` fallback.
+        assert!(xml.contains("<relation id=\"500\">"));
 
         let parsed = parse_osm_xml_str(&xml).unwrap();
 
         assert_eq!(parsed.relations.len(), 1);
+        assert_eq!(parsed.relations[0].id, 500);
         assert_eq!(parsed.relations[0].tags["name"], "A&B Park");
         assert_eq!(parsed.relations[0].tags["type"], "multipolygon");
         assert_eq!(parsed.relations[0].members.len(), 2);
@@ -807,6 +896,7 @@ mod tests {
                 node_refs: vec![1, 2, 3],
             }],
             vec![OsmRelation {
+                id: 200,
                 tags: HashMap::from([
                     ("type".to_string(), "multipolygon".to_string()),
                     ("landuse".to_string(), "park".to_string()),
