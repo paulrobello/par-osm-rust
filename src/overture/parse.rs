@@ -329,13 +329,11 @@ pub(crate) fn parse_overture_geojson_with_allocator(
         None
     };
 
-    Ok(OsmData::new(
-        nodes,
-        ways,
-        Vec::new(),
-        bounds,
-        poi_nodes,
-        addr_nodes,
-        tree_nodes,
-    ))
+    Ok(OsmData::default()
+        .with_nodes(nodes)
+        .with_ways(ways)
+        .with_bounds(bounds)
+        .with_poi_nodes(poi_nodes)
+        .with_addr_nodes(addr_nodes)
+        .with_tree_nodes(tree_nodes))
 }

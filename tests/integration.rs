@@ -1,8 +1,9 @@
 //! ARC-019: integration tests for the pure parse/write/merge/clip pipeline.
 //!
-//! All tests use ONLY the public API (`OsmData::new`, `parse_osm_xml_str`,
-//! `write_osm_xml_string`, `merge_source_data`, `clip_to_bbox`, and the public
-//! fields on `OsmData`). No network calls, no `blocking` feature, no overpass/
+//! All tests use ONLY the public API (`OsmData::default` + the `with_*`
+//! builder, `parse_osm_xml_str`, `write_osm_xml_string`,
+//! `merge_source_data`, `clip_to_bbox`, and the public read accessors on
+//! `OsmData`). No network calls, no `blocking` feature, no overpass/
 //! srtm/overture fetch paths — so the file compiles and passes under both
 //! `cargo test --all-features` and `cargo test --no-default-features`.
 //!
@@ -53,17 +54,9 @@ const ROUND_TRIP_FIXTURE: &str = r#"<?xml version="1.0"?>
   </relation>
 </osm>"#;
 
-/// Build an empty `OsmData` (no nodes/ways/POIs) via the public constructor.
+/// Build an empty `OsmData` (no nodes/ways/POIs) via the public builder.
 fn empty_osm_data() -> OsmData {
-    OsmData::new(
-        HashMap::new(),
-        Vec::new(),
-        Vec::new(),
-        Some((51.5, -0.10, 51.51, -0.09)),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-    )
+    OsmData::default()
 }
 
 /// Helper to build a tagged POI node.
@@ -134,43 +127,43 @@ fn parse_then_write_then_parse_preserves_full_osm_data() {
     );
 
     // POI / address / tree node classification from tagged nodes.
-    assert_eq!(first.poi_nodes.len(), 1);
+    assert_eq!(first.poi_nodes().len(), 1);
     assert_eq!(
-        first.poi_nodes[0].tags.get("amenity").map(String::as_str),
+        first.poi_nodes()[0].tags.get("amenity").map(String::as_str),
         Some("cafe")
     );
     // XML entity decoding: `A&amp;B Cafe` → `A&B Cafe`.
     assert_eq!(
-        first.poi_nodes[0].tags.get("name").map(String::as_str),
+        first.poi_nodes()[0].tags.get("name").map(String::as_str),
         Some("A&B Cafe")
     );
-    assert_eq!(first.poi_nodes[0].source, FeatureSource::Osm);
-    assert_eq!(first.addr_nodes.len(), 1);
+    assert_eq!(first.poi_nodes()[0].source, FeatureSource::Osm);
+    assert_eq!(first.addr_nodes().len(), 1);
     assert_eq!(
-        first.addr_nodes[0]
+        first.addr_nodes()[0]
             .tags
             .get("addr:housenumber")
             .map(String::as_str),
         Some("42")
     );
-    assert_eq!(first.tree_nodes.len(), 1);
+    assert_eq!(first.tree_nodes().len(), 1);
 
     // Relation with way member + multipolygon tags.
-    assert_eq!(first.relations.len(), 1);
+    assert_eq!(first.relations().len(), 1);
     assert_eq!(
-        first.relations[0].tags.get("type").map(String::as_str),
+        first.relations()[0].tags.get("type").map(String::as_str),
         Some("multipolygon")
     );
     assert_eq!(
-        first.relations[0].tags.get("landuse").map(String::as_str),
+        first.relations()[0].tags.get("landuse").map(String::as_str),
         Some("park")
     );
-    assert_eq!(first.relations[0].members.len(), 1);
-    assert_eq!(first.relations[0].members[0].way_id, 10);
-    assert_eq!(first.relations[0].members[0].role, "outer");
+    assert_eq!(first.relations()[0].members.len(), 1);
+    assert_eq!(first.relations()[0].members[0].way_id, 10);
+    assert_eq!(first.relations()[0].members[0].role, "outer");
 
     // Explicit <bounds> wins over node-derived bounds.
-    assert_eq!(first.bounds, Some((51.5, -0.10, 51.51, -0.09)));
+    assert_eq!(first.bounds(), Some((51.5, -0.10, 51.51, -0.09)));
 
     // Write to XML and re-parse: the round-trip must preserve every collection
     // that was observable on the first parse. This exercises the writer +
@@ -191,20 +184,20 @@ fn parse_then_write_then_parse_preserves_full_osm_data() {
 
     // POI preserved with entity-decoded name round-tripping back through the
     // writer's escaping.
-    assert_eq!(second.poi_nodes.len(), 1);
+    assert_eq!(second.poi_nodes().len(), 1);
     assert_eq!(
-        second.poi_nodes[0].tags.get("amenity").map(String::as_str),
+        second.poi_nodes()[0].tags.get("amenity").map(String::as_str),
         Some("cafe")
     );
     assert_eq!(
-        second.poi_nodes[0].tags.get("name").map(String::as_str),
+        second.poi_nodes()[0].tags.get("name").map(String::as_str),
         Some("A&B Cafe")
     );
 
     // Address node preserved.
-    assert_eq!(second.addr_nodes.len(), 1);
+    assert_eq!(second.addr_nodes().len(), 1);
     assert_eq!(
-        second.addr_nodes[0]
+        second.addr_nodes()[0]
             .tags
             .get("addr:housenumber")
             .map(String::as_str),
@@ -212,56 +205,54 @@ fn parse_then_write_then_parse_preserves_full_osm_data() {
     );
 
     // Tree node preserved (lat/lon only — no tags on OsmNode).
-    assert_eq!(second.tree_nodes.len(), 1);
+    assert_eq!(second.tree_nodes().len(), 1);
 
     // Relation preserved (tags, members, roles).
-    assert_eq!(second.relations.len(), 1);
+    assert_eq!(second.relations().len(), 1);
     assert_eq!(
-        second.relations[0].tags.get("type").map(String::as_str),
+        second.relations()[0].tags.get("type").map(String::as_str),
         Some("multipolygon")
     );
     assert_eq!(
-        second.relations[0].tags.get("landuse").map(String::as_str),
+        second.relations()[0].tags.get("landuse").map(String::as_str),
         Some("park")
     );
-    assert_eq!(second.relations[0].members.len(), 1);
-    assert_eq!(second.relations[0].members[0].way_id, 10);
-    assert_eq!(second.relations[0].members[0].role, "outer");
+    assert_eq!(second.relations()[0].members.len(), 1);
+    assert_eq!(second.relations()[0].members[0].way_id, 10);
+    assert_eq!(second.relations()[0].members[0].role, "outer");
 
     // Bounds preserved.
-    assert_eq!(second.bounds, first.bounds);
+    assert_eq!(second.bounds(), first.bounds());
 }
 
 #[test]
 fn merge_source_data_dedupes_duplicate_pois_preferring_overture() {
     // Two POIs at the same place (within the 25 m duplicate threshold) with
     // matching category + name. Overture must win under OverturePreferred.
-    let mut osm = empty_osm_data();
-    osm.poi_nodes.push(poi(
+    let osm = empty_osm_data().with_poi_nodes(vec![poi(
         51.50000,
         -0.10000,
         "amenity",
         "restaurant",
         "Diner",
         FeatureSource::Osm,
-    ));
-    let mut overture = empty_osm_data();
-    overture.poi_nodes.push(poi(
+    )]);
+    let overture = empty_osm_data().with_poi_nodes(vec![poi(
         51.50005,
         -0.10005,
         "amenity",
         "restaurant",
         "Diner",
         FeatureSource::Overture,
-    ));
+    )]);
 
     let merged = merge_source_data(osm, Some(overture), PoiSourceMode::OverturePreferred);
 
     assert_eq!(merged.status, SourceStatus::OverturePreferred);
-    assert_eq!(merged.data.poi_nodes.len(), 1);
-    assert_eq!(merged.data.poi_nodes[0].source, FeatureSource::Overture);
+    assert_eq!(merged.data.poi_nodes().len(), 1);
+    assert_eq!(merged.data.poi_nodes()[0].source, FeatureSource::Overture);
     assert_eq!(
-        merged.data.poi_nodes[0]
+        merged.data.poi_nodes()[0]
             .tags
             .get("name")
             .map(String::as_str),
@@ -273,51 +264,49 @@ fn merge_source_data_dedupes_duplicate_pois_preferring_overture() {
 #[test]
 fn merge_source_data_keeps_distinct_pois_under_both_mode() {
     // Same name but different POI category → not duplicates → both kept.
-    let mut osm = empty_osm_data();
-    osm.poi_nodes.push(poi(
+    let osm = empty_osm_data().with_poi_nodes(vec![poi(
         51.50000,
         -0.10000,
         "amenity",
         "restaurant",
         "Corner",
         FeatureSource::Osm,
-    ));
-    let mut overture = empty_osm_data();
-    overture.poi_nodes.push(poi(
+    )]);
+    let overture = empty_osm_data().with_poi_nodes(vec![poi(
         51.50005,
         -0.10005,
         "shop",
         "bakery",
         "Corner",
         FeatureSource::Overture,
-    ));
+    )]);
 
     let merged = merge_source_data(osm, Some(overture), PoiSourceMode::Both);
 
     assert_eq!(merged.status, SourceStatus::Both);
-    assert_eq!(merged.data.poi_nodes.len(), 2);
-    let sources: Vec<FeatureSource> = merged.data.poi_nodes.iter().map(|p| p.source).collect();
+    assert_eq!(merged.data.poi_nodes().len(), 2);
+    let sources: Vec<FeatureSource> =
+        merged.data.poi_nodes().iter().map(|p| p.source).collect();
     assert!(sources.contains(&FeatureSource::Osm));
     assert!(sources.contains(&FeatureSource::Overture));
 }
 
 #[test]
 fn merge_source_data_overture_preferred_falls_back_when_overture_absent() {
-    let mut osm = empty_osm_data();
-    osm.poi_nodes.push(poi(
+    let osm = empty_osm_data().with_poi_nodes(vec![poi(
         51.5,
         -0.1,
         "shop",
         "bakery",
         "Bakery",
         FeatureSource::Osm,
-    ));
+    )]);
 
     let merged = merge_source_data(osm, None, PoiSourceMode::OverturePreferred);
 
     assert_eq!(merged.status, SourceStatus::OvertureFallbackToOsm);
-    assert_eq!(merged.data.poi_nodes.len(), 1);
-    assert_eq!(merged.data.poi_nodes[0].source, FeatureSource::Osm);
+    assert_eq!(merged.data.poi_nodes().len(), 1);
+    assert_eq!(merged.data.poi_nodes()[0].source, FeatureSource::Osm);
     assert!(
         merged
             .warnings
@@ -356,21 +345,21 @@ fn clip_to_bbox_keeps_only_ways_touching_the_bbox_and_bounds_nodes() {
         tags: HashMap::from([("landuse".to_string(), "park".to_string())]),
         node_refs: vec![8 * 11 + 8, 8 * 11 + 10, 10 * 11 + 10],
     };
-    let mut data = OsmData::new(
-        nodes,
-        vec![way_inside, way_outside],
+    let mut data = OsmData::default()
+        .with_nodes(nodes)
+        .with_ways(vec![way_inside, way_outside])
         // Attach a relation referencing the outside way; it must be pruned
         // because its only member way is outside the clip bbox.
-        vec![OsmRelation {
+        .with_relations(vec![OsmRelation {
             tags: HashMap::from([("type".to_string(), "multipolygon".to_string())]),
             members: vec![RelationMember {
                 way_id: 2,
                 role: "outer".to_string(),
             }],
-        }],
-        Some((0.0, 0.0, 10.0, 10.0)),
+        }])
+        .with_bounds(Some((0.0, 0.0, 10.0, 10.0)))
         // One POI inside the clip bbox and one outside.
-        vec![
+        .with_poi_nodes(vec![
             poi(
                 4.5,
                 4.5,
@@ -387,10 +376,7 @@ fn clip_to_bbox_keeps_only_ways_touching_the_bbox_and_bounds_nodes() {
                 "Outside Cafe",
                 FeatureSource::Osm,
             ),
-        ],
-        Vec::new(),
-        Vec::new(),
-    );
+        ]);
     data.validate_invariants().expect("invariants before clip");
 
     let clip_bbox = (3.0, 3.0, 7.0, 7.0);
@@ -398,7 +384,7 @@ fn clip_to_bbox_keeps_only_ways_touching_the_bbox_and_bounds_nodes() {
     data.validate_invariants().expect("invariants after clip");
 
     // Bounds reflect the clip bbox exactly.
-    assert_eq!(data.bounds, Some(clip_bbox));
+    assert_eq!(data.bounds(), Some(clip_bbox));
 
     // Only the inside way survives; its tags survive too.
     let surviving: Vec<i64> = data.iter_ways().map(|w| w.id).collect();
@@ -412,14 +398,14 @@ fn clip_to_bbox_keeps_only_ways_touching_the_bbox_and_bounds_nodes() {
     // The relation referencing the outside way is pruned (its member no longer
     // exists in ways_by_id).
     assert!(
-        data.relations.is_empty(),
+        data.relations().is_empty(),
         "relation with only-outside members must be pruned"
     );
 
     // Only the inside POI survives.
-    assert_eq!(data.poi_nodes.len(), 1);
+    assert_eq!(data.poi_nodes().len(), 1);
     assert_eq!(
-        data.poi_nodes[0].tags.get("name").map(String::as_str),
+        data.poi_nodes()[0].tags.get("name").map(String::as_str),
         Some("Inside Cafe")
     );
 
@@ -446,10 +432,10 @@ fn clip_to_bbox_on_empty_data_is_a_noop() {
     data.clip_to_bbox((1.0, 1.0, 2.0, 2.0));
     data.validate_invariants()
         .expect("invariants after empty clip");
-    assert_eq!(data.bounds, Some((1.0, 1.0, 2.0, 2.0)));
+    assert_eq!(data.bounds(), Some((1.0, 1.0, 2.0, 2.0)));
     assert_eq!(data.iter_ways().count(), 0);
-    assert!(data.poi_nodes.is_empty());
-    assert!(data.relations.is_empty());
+    assert!(data.poi_nodes().is_empty());
+    assert!(data.relations().is_empty());
 }
 
 #[test]
@@ -458,44 +444,36 @@ fn merge_combines_ways_and_relations_from_both_sources() {
     // After merge, both ways and both relations are present and the ways_by_id
     // invariant still holds (verifiable through the public validate_invariants
     // + way_id_at accessors).
-    let osm = OsmData::new(
-        HashMap::from([(1, OsmNode { lat: 0.0, lon: 0.0 })]),
-        vec![OsmWay {
+    let osm = OsmData::default()
+        .with_nodes(HashMap::from([(1, OsmNode { lat: 0.0, lon: 0.0 })]))
+        .with_ways(vec![OsmWay {
             id: 100,
             tags: HashMap::new(),
             node_refs: vec![1],
-        }],
-        vec![OsmRelation {
+        }])
+        .with_relations(vec![OsmRelation {
             tags: HashMap::from([("type".to_string(), "multipolygon".to_string())]),
             members: vec![RelationMember {
                 way_id: 100,
                 role: "outer".to_string(),
             }],
-        }],
-        Some((0.0, 0.0, 1.0, 1.0)),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-    );
-    let other = OsmData::new(
-        HashMap::from([(2, OsmNode { lat: 1.0, lon: 1.0 })]),
-        vec![OsmWay {
+        }])
+        .with_bounds(Some((0.0, 0.0, 1.0, 1.0)));
+    let other = OsmData::default()
+        .with_nodes(HashMap::from([(2, OsmNode { lat: 1.0, lon: 1.0 })]))
+        .with_ways(vec![OsmWay {
             id: 200,
             tags: HashMap::new(),
             node_refs: vec![2],
-        }],
-        vec![OsmRelation {
+        }])
+        .with_relations(vec![OsmRelation {
             tags: HashMap::from([("type".to_string(), "multipolygon".to_string())]),
             members: vec![RelationMember {
                 way_id: 200,
                 role: "outer".to_string(),
             }],
-        }],
-        Some((1.0, 1.0, 2.0, 2.0)),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-    );
+        }])
+        .with_bounds(Some((1.0, 1.0, 2.0, 2.0)));
 
     let mut merged = osm;
     merged.merge(other);
@@ -509,8 +487,8 @@ fn merge_combines_ways_and_relations_from_both_sources() {
     assert_eq!(merged.way_id_at(1), Some(200));
 
     // Both relations present.
-    assert_eq!(merged.relations.len(), 2);
+    assert_eq!(merged.relations().len(), 2);
 
     // Bounds unioned across the two sources.
-    assert_eq!(merged.bounds, Some((0.0, 0.0, 2.0, 2.0)));
+    assert_eq!(merged.bounds(), Some((0.0, 0.0, 2.0, 2.0)));
 }

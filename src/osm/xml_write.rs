@@ -61,15 +61,8 @@ fn write_tags(xml: &mut String, tags: &HashMap<String, String>) {
 /// use par_osm_rust::osm::{write_osm_xml_string, OsmData, OsmNode};
 /// use std::collections::HashMap;
 ///
-/// let data = OsmData::new(
-///     HashMap::from([(1, OsmNode { lat: 51.5, lon: -0.10 })]),
-///     Vec::new(),
-///     Vec::new(),
-///     None,
-///     Vec::new(),
-///     Vec::new(),
-///     Vec::new(),
-/// );
+/// let data = OsmData::default()
+///     .with_nodes(HashMap::from([(1, OsmNode { lat: 51.5, lon: -0.10 })]));
 /// let xml = write_osm_xml_string(&data);
 /// assert!(xml.contains("<node id=\"1\""));
 /// ```

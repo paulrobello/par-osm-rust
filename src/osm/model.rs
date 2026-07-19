@@ -103,22 +103,25 @@ pub struct OsmRelation {
 
 /// Parsed OSM dataset.
 ///
-/// **Field encapsulation is partial (ARC-109 interim).** The `nodes`,
-/// `ways`, and `ways_by_id` fields are `pub(crate)` and must be reached
-/// through the accessors below ([`OsmData::nodes`], [`OsmData::ways`],
-/// [`OsmData::ways_by_id`], [`OsmData::iter_ways`], [`OsmData::way_id_at`]).
-/// The remaining collections (`relations`, `bounds`, `poi_nodes`,
-/// `addr_nodes`, `tree_nodes`) are still `pub` for direct field access by
-/// downstream consumers; a planned 0.3.0 release will move them behind
-/// read accessors and a builder so the encapsulation is consistent across
-/// the struct.
+/// **Field encapsulation (ARC-109, 0.3.0).** Every collection on this
+/// struct is `pub(crate)`; downstream consumers read them through the
+/// accessors below ([`OsmData::nodes`], [`OsmData::ways`],
+/// [`OsmData::ways_by_id`], [`OsmData::relations`], [`OsmData::bounds`],
+/// [`OsmData::poi_nodes`], [`OsmData::addr_nodes`], [`OsmData::tree_nodes`],
+/// plus [`OsmData::iter_ways`] and [`OsmData::way_id_at`]). Construct an
+/// `OsmData` via [`OsmData::default`] plus the consuming `with_*` builder
+/// methods ([`OsmData::with_nodes`], [`OsmData::with_ways`], …). The
+/// historical [`OsmData::new`] constructor is retained through the 0.3.x
+/// deprecation window but emits a `deprecated` warning per call.
 ///
 /// The `ways` / `ways_by_id` pair in particular must stay in lock-step: each
 /// entry in `ways` has exactly one corresponding entry in `ways_by_id`
 /// mapping its OSM id to its index. The pair is mutated only by
-/// [`OsmData::new`] and [`OsmData::push_way`]; in-place bulk operations
-/// (`merge`, `clip_to_bbox`) preserve the invariant internally and are
-/// checked by [`OsmData::validate_invariants`] in debug builds.
+/// [`OsmData::default`]/[`OsmData::with_ways`] (the builder route),
+/// [`OsmData::new`] (the deprecated route), and [`OsmData::push_way`];
+/// in-place bulk operations (`merge`, `clip_to_bbox`) preserve the
+/// invariant internally and are checked by [`OsmData::validate_invariants`]
+/// in debug builds.
 pub struct OsmData {
     /// All nodes keyed by OSM id.
     pub(crate) nodes: HashMap<i64, OsmNode>,
@@ -129,19 +132,40 @@ pub struct OsmData {
     /// Maps each OSM way ID to its position in the `ways` vector. Storing an
     /// index avoids duplicating `OsmWay` values while still allowing relation
     /// members to find their referenced ways efficiently. Maintained
-    /// exclusively by [`OsmData::new`] and [`OsmData::push_way`].
+    /// exclusively by the constructor paths and [`OsmData::push_way`].
     pub(crate) ways_by_id: HashMap<i64, usize>,
     /// Multipolygon relations.
-    pub relations: Vec<OsmRelation>,
+    pub(crate) relations: Vec<OsmRelation>,
     /// Bounding box: (south, west, north, east)
-    pub bounds: Option<(f64, f64, f64, f64)>,
+    pub(crate) bounds: Option<(f64, f64, f64, f64)>,
     /// Standalone nodes with POI tags (amenity, shop, tourism, leisure, historic).
-    pub poi_nodes: Vec<OsmPoiNode>,
+    pub(crate) poi_nodes: Vec<OsmPoiNode>,
     /// Standalone nodes with address tags (addr:housenumber).
     /// These are typically entrance/door nodes placed on building outlines in OSM.
-    pub addr_nodes: Vec<OsmPoiNode>,
+    pub(crate) addr_nodes: Vec<OsmPoiNode>,
     /// Individual tree positions (from OSM `natural=tree` or Overture `land/tree`).
-    pub tree_nodes: Vec<OsmNode>,
+    pub(crate) tree_nodes: Vec<OsmNode>,
+}
+
+impl Default for OsmData {
+    /// Empty `OsmData` — the starting point for the `with_*` builder.
+    ///
+    /// All collections are empty and `bounds` is `None`. The `ways` /
+    /// `ways_by_id` invariant holds trivially (both empty). Prefer this
+    /// plus the `with_*` chain over the deprecated [`OsmData::new`]
+    /// constructor (ARC-109, 0.3.0).
+    fn default() -> Self {
+        Self {
+            nodes: HashMap::new(),
+            ways: Vec::new(),
+            ways_by_id: HashMap::new(),
+            relations: Vec::new(),
+            bounds: None,
+            poi_nodes: Vec::new(),
+            addr_nodes: Vec::new(),
+            tree_nodes: Vec::new(),
+        }
+    }
 }
 
 impl OsmData {
@@ -153,9 +177,17 @@ impl OsmData {
     /// `ways_by_id[way.id] = index`. Callers must populate [`OsmWay::id`]
     /// before passing ways in (QA-021).
     ///
+    /// **Deprecated since 0.3.0 (ARC-109).** Prefer
+    /// [`OsmData::default`] plus the `with_*` builder, which composes more
+    /// naturally and routes way insertion through the same invariant-maintaining
+    /// path. The historical positional-argument constructor is retained for
+    /// the 0.3.x deprecation window to keep downstream call sites compiling.
+    ///
     /// # Examples
     ///
     /// ```
+    /// # #[allow(deprecated)]
+    /// # {
     /// use par_osm_rust::osm::{OsmData, OsmNode};
     /// use std::collections::HashMap;
     ///
@@ -169,7 +201,12 @@ impl OsmData {
     ///     Vec::new(),
     /// );
     /// assert_eq!(data.iter_ways().count(), 0);
+    /// # }
     /// ```
+    #[deprecated(
+        since = "0.3.0",
+        note = "use OsmData::default() + the with_* builder"
+    )]
     pub fn new(
         nodes: HashMap<i64, OsmNode>,
         ways: Vec<OsmWay>,
@@ -199,6 +236,100 @@ impl OsmData {
             "OsmData::new produced an inconsistent state"
         );
         data
+    }
+
+    // ── Builder (ARC-109, 0.3.0) ──────────────────────────────────────────
+    //
+    // Each `with_*` method consumes `self`, sets one field, and returns
+    // `Self` so callers can chain:
+    //
+    //     let data = OsmData::default()
+    //         .with_nodes(nodes)
+    //         .with_ways(ways)
+    //         .with_bounds(Some(bbox));
+    //
+    // `with_ways` is the only method that touches more than one field — it
+    // also rebuilds `ways_by_id` from `OsmWay::id`, exactly as the deprecated
+    // `new()` constructor does. Every other `with_*` is a plain field
+    // assignment. Every method re-validates the invariants in debug builds so
+    // a misconfigured builder chain fails loudly.
+
+    /// Replace the `nodes` map (keyed by OSM id).
+    pub fn with_nodes(mut self, nodes: HashMap<i64, OsmNode>) -> Self {
+        self.nodes = nodes;
+        debug_assert!(
+            self.validate_invariants().is_ok(),
+            "OsmData::with_nodes produced an inconsistent state"
+        );
+        self
+    }
+
+    /// Replace the `ways` slice and rebuild `ways_by_id` from each
+    /// [`OsmWay::id`], preserving the `ways` / `ways_by_id` invariant. This
+    /// is the sanctioned builder route for the invariant that the deprecated
+    /// [`OsmData::new`] constructor also establishes.
+    pub fn with_ways(mut self, ways: Vec<OsmWay>) -> Self {
+        self.ways_by_id = ways
+            .iter()
+            .enumerate()
+            .map(|(idx, way)| (way.id, idx))
+            .collect();
+        self.ways = ways;
+        debug_assert!(
+            self.validate_invariants().is_ok(),
+            "OsmData::with_ways produced an inconsistent state"
+        );
+        self
+    }
+
+    /// Replace the multipolygon relations slice.
+    pub fn with_relations(mut self, relations: Vec<OsmRelation>) -> Self {
+        self.relations = relations;
+        debug_assert!(
+            self.validate_invariants().is_ok(),
+            "OsmData::with_relations produced an inconsistent state"
+        );
+        self
+    }
+
+    /// Replace the dataset bounding box (`(south, west, north, east)`).
+    pub fn with_bounds(mut self, bounds: Option<(f64, f64, f64, f64)>) -> Self {
+        self.bounds = bounds;
+        debug_assert!(
+            self.validate_invariants().is_ok(),
+            "OsmData::with_bounds produced an inconsistent state"
+        );
+        self
+    }
+
+    /// Replace the standalone POI nodes slice.
+    pub fn with_poi_nodes(mut self, poi_nodes: Vec<OsmPoiNode>) -> Self {
+        self.poi_nodes = poi_nodes;
+        debug_assert!(
+            self.validate_invariants().is_ok(),
+            "OsmData::with_poi_nodes produced an inconsistent state"
+        );
+        self
+    }
+
+    /// Replace the standalone address nodes slice.
+    pub fn with_addr_nodes(mut self, addr_nodes: Vec<OsmPoiNode>) -> Self {
+        self.addr_nodes = addr_nodes;
+        debug_assert!(
+            self.validate_invariants().is_ok(),
+            "OsmData::with_addr_nodes produced an inconsistent state"
+        );
+        self
+    }
+
+    /// Replace the standalone tree nodes slice.
+    pub fn with_tree_nodes(mut self, tree_nodes: Vec<OsmNode>) -> Self {
+        self.tree_nodes = tree_nodes;
+        debug_assert!(
+            self.validate_invariants().is_ok(),
+            "OsmData::with_tree_nodes produced an inconsistent state"
+        );
+        self
     }
 
     /// Append a way, updating `ways_by_id` atomically from [`OsmWay::id`].
@@ -251,6 +382,40 @@ impl OsmData {
     /// [`OsmData::ways`].
     pub fn ways_by_id(&self) -> &HashMap<i64, usize> {
         &self.ways_by_id
+    }
+
+    /// Borrow the multipolygon relations slice.
+    ///
+    /// Relations are stored in arrival order (parser) or appended in
+    /// merge order; no de-duplication is performed.
+    pub fn relations(&self) -> &[OsmRelation] {
+        &self.relations
+    }
+
+    /// The dataset bounding box as `(south, west, north, east)`, or `None`
+    /// when no bbox has been recorded (e.g. an empty dataset, or one
+    /// constructed via [`OsmData::default`] without [`OsmData::with_bounds`]).
+    pub fn bounds(&self) -> Option<(f64, f64, f64, f64)> {
+        self.bounds
+    }
+
+    /// Borrow the standalone POI nodes slice (nodes carrying
+    /// `amenity`/`shop`/`tourism`/`leisure`/`historic`).
+    pub fn poi_nodes(&self) -> &[OsmPoiNode] {
+        &self.poi_nodes
+    }
+
+    /// Borrow the standalone address nodes slice (nodes carrying
+    /// `addr:housenumber`, typically entrance/door nodes on building
+    /// outlines).
+    pub fn addr_nodes(&self) -> &[OsmPoiNode] {
+        &self.addr_nodes
+    }
+
+    /// Borrow the individual tree-node positions (OSM `natural=tree` or
+    /// Overture `land/tree`). Each entry carries lat/lon only — no tags.
+    pub fn tree_nodes(&self) -> &[OsmNode] {
+        &self.tree_nodes
     }
 
     /// Verify the `ways` / `ways_by_id` invariant: equal lengths, every

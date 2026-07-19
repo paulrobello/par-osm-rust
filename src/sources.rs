@@ -278,19 +278,10 @@ fn dedupe_pois_with_overture_preference(mut pois: Vec<OsmPoiNode>) -> Vec<OsmPoi
 /// use par_osm_rust::sources::{merge_source_data, PoiSourceMode, SourceStatus};
 ///
 /// fn empty_osm_data() -> OsmData {
-///     OsmData::new(
-///         HashMap::new(),
-///         Vec::new(),
-///         Vec::new(),
-///         None,
-///         Vec::new(),
-///         Vec::new(),
-///         Vec::new(),
-///     )
+///     OsmData::default()
 /// }
 ///
-/// let mut osm = empty_osm_data();
-/// osm.poi_nodes.push(OsmPoiNode {
+/// let osm = empty_osm_data().with_poi_nodes(vec![OsmPoiNode {
 ///     lat: 51.5,
 ///     lon: -0.1,
 ///     tags: HashMap::from([
@@ -298,11 +289,11 @@ fn dedupe_pois_with_overture_preference(mut pois: Vec<OsmPoiNode>) -> Vec<OsmPoi
 ///         ("name".to_string(), "Diner".to_string()),
 ///     ]),
 ///     source: FeatureSource::Osm,
-/// });
+/// }]);
 ///
 /// let result = merge_source_data(osm, None, PoiSourceMode::OverturePreferred);
 /// assert_eq!(result.status, SourceStatus::OvertureFallbackToOsm);
-/// assert_eq!(result.data.poi_nodes.len(), 1);
+/// assert_eq!(result.data.poi_nodes().len(), 1);
 /// ```
 pub fn merge_source_data(
     mut osm_data: OsmData,
@@ -576,6 +567,9 @@ pub fn fetch_map_data(
 }
 
 #[cfg(test)]
+// ARC-109 (0.3.0): the lib's own tests exercise the deprecated `OsmData::new`
+// constructor for coverage of the legacy positional-argument path.
+#[allow(deprecated)]
 mod tests {
     use super::*;
 

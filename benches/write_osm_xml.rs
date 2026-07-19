@@ -49,15 +49,11 @@ fn build_osm_data(node_count: i64, way_count: i64, poi_count: usize) -> OsmData 
             source: FeatureSource::Osm,
         })
         .collect();
-    OsmData::new(
-        nodes,
-        ways,
-        Vec::new(),
-        Some((0.0, 0.0, 1.0, 1.0)),
-        poi_nodes,
-        Vec::new(),
-        Vec::new(),
-    )
+    OsmData::default()
+        .with_nodes(nodes)
+        .with_ways(ways)
+        .with_bounds(Some((0.0, 0.0, 1.0, 1.0)))
+        .with_poi_nodes(poi_nodes)
 }
 
 fn bench_write_osm_xml_string(c: &mut Criterion) {

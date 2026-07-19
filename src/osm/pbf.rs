@@ -242,7 +242,12 @@ pub fn parse_pbf(path: &Path) -> Result<OsmData> {
         tree_nodes.len()
     );
 
-    Ok(OsmData::new(
-        nodes, ways, relations, bounds, poi_nodes, addr_nodes, tree_nodes,
-    ))
+    Ok(OsmData::default()
+        .with_nodes(nodes)
+        .with_ways(ways)
+        .with_relations(relations)
+        .with_bounds(bounds)
+        .with_poi_nodes(poi_nodes)
+        .with_addr_nodes(addr_nodes)
+        .with_tree_nodes(tree_nodes))
 }

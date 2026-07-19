@@ -36,15 +36,9 @@ fn data_with_pois(count: usize, source: FeatureSource) -> OsmData {
             }
         })
         .collect();
-    OsmData::new(
-        HashMap::new(),
-        Vec::new(),
-        Vec::new(),
-        Some((0.0, 0.0, 1.0, 1.0)),
-        poi_nodes,
-        Vec::new(),
-        Vec::new(),
-    )
+    OsmData::default()
+        .with_bounds(Some((0.0, 0.0, 1.0, 1.0)))
+        .with_poi_nodes(poi_nodes)
 }
 
 /// Build a matching Overture source whose POIs sit ~5 m north-east of each
@@ -67,15 +61,9 @@ fn data_with_overture_duplicates(count: usize) -> OsmData {
             }
         })
         .collect();
-    OsmData::new(
-        HashMap::new(),
-        Vec::new(),
-        Vec::new(),
-        Some((0.0, 0.0, 1.0, 1.0)),
-        poi_nodes,
-        Vec::new(),
-        Vec::new(),
-    )
+    OsmData::default()
+        .with_bounds(Some((0.0, 0.0, 1.0, 1.0)))
+        .with_poi_nodes(poi_nodes)
 }
 
 fn bench_merge_source_data_dedupe(c: &mut Criterion) {
@@ -98,7 +86,7 @@ fn bench_merge_source_data_dedupe(c: &mut Criterion) {
                 },
                 |(osm, overture)| {
                     let result = merge_source_data(osm, Some(overture), PoiSourceMode::Both);
-                    assert_eq!(result.data.poi_nodes.len(), count);
+                    assert_eq!(result.data.poi_nodes().len(), count);
                     assert_eq!(result.status, par_osm_rust::sources::SourceStatus::Both);
                 },
                 BatchSize::SmallInput,

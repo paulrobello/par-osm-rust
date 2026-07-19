@@ -42,6 +42,11 @@ pub use xml_write::write_osm_xml_string;
 pub(crate) use model::POI_TAG_KEYS;
 
 #[cfg(test)]
+// ARC-109 (0.3.0): the lib's own tests exercise the deprecated `OsmData::new`
+// constructor for coverage of the legacy positional-argument path. Migrating
+// every call site to the builder would obscure what's under test, so the
+// module allows `deprecated` at the module granularity.
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use crate::synthetic_ids::SYNTHETIC_NODE_ID_BASE;

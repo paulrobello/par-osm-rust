@@ -93,7 +93,7 @@ fn main() -> anyhow::Result<()> {
     let result = fetch_map_data(bbox, &options, &mut progress)?;
 
     println!("status: {:?}", result.status);
-    println!("pois: {}", result.data.poi_nodes.len());
+    println!("pois: {}", result.data.poi_nodes().len());
     for warning in result.warnings {
         eprintln!("warning: {warning}");
     }
@@ -238,18 +238,21 @@ The Overture cache has the equivalent `overture::list_overture_areas()` and `ove
 
 ## Normalized OSM data model
 
-The central type is `osm::OsmData`. The `ways` and `ways_by_id` fields are coupled (every way has exactly one entry in the index mapping its OSM id to its position) and are encapsulated: construction goes through `osm::OsmData::new` and incremental mutation through `osm::OsmData::push_way`, so external code cannot put the pair out of sync. `OsmWay` carries its own `id: i64` field, so the index stays consistent without an inverse lookup. Accessors:
+The central type is `osm::OsmData`. Every field is `pub(crate)`; construction goes through `osm::OsmData::default()` plus the consuming `with_*` builder (or the deprecated `osm::OsmData::new` positional constructor), and incremental way mutation goes through `osm::OsmData::push_way`, so external code cannot put the `ways` / `ways_by_id` pair out of sync. `OsmWay` carries its own `id: i64` field, so the index stays consistent without an inverse lookup. Read accessors:
 
-- `new(nodes, ways, relations, bounds, poi_nodes, addr_nodes, tree_nodes)` constructs an `OsmData` and seeds `ways_by_id` from each way's `id`.
+- `default()` produces an empty `OsmData` (the starting point for the builder).
+- `with_nodes(nodes)` / `with_ways(ways)` / `with_relations(...)` / `with_bounds(...)` / `with_poi_nodes(...)` / `with_addr_nodes(...)` / `with_tree_nodes(...)` — consume-self builder methods. `with_ways` seeds `ways_by_id` from each way's `id`.
+- `new(nodes, ways, relations, bounds, poi_nodes, addr_nodes, tree_nodes)` — the **deprecated** 0.2.x positional constructor; prefer `default()` + the builder.
 - `push_way(way)` appends a way and updates `ways_by_id` atomically.
-- `nodes()` borrows the node map keyed by OSM id (read view for the encapsulated `nodes` field).
-- `ways()` borrows the ways slice in insertion order (read view for `ways`).
-- `ways_by_id()` borrows the way-id → ways-index lookup map (read view for `ways_by_id`).
-- `iter_ways()` borrows the ways slice in insertion order (iterator form of `ways()`).
+- `nodes()` borrows the node map keyed by OSM id.
+- `ways()` borrows the ways slice in insertion order.
+- `ways_by_id()` borrows the way-id → ways-index lookup map.
+- `iter_ways()` iterator form of `ways()`.
 - `way_id_at(index)` recovers a way's OSM id by index.
-- `validate_invariants()` verifies the `ways` / `ways_by_id` pair (called automatically in debug builds from `new`/`push_way`).
+- `relations()` / `bounds()` / `poi_nodes()` / `addr_nodes()` / `tree_nodes()` borrow the corresponding encapsulated collection.
+- `validate_invariants()` verifies the `ways` / `ways_by_id` pair (called automatically in debug builds from the builder and `push_way`).
 
-Top-level collections:
+Top-level collections (all behind the accessors above):
 
 - `nodes`: OSM or synthetic node coordinates keyed by ID.
 - `ways` / `ways_by_id`: ordered node-reference geometry with tags, plus the id→index lookup used for relation member resolution.

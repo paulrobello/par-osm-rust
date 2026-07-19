@@ -5,7 +5,6 @@
 //! file do not carry their own per-item `cfg` gates.
 
 use anyhow::{Context, Result, bail};
-use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -350,15 +349,7 @@ pub fn fetch_geojson_for_type(
 
 /// Create an empty [`OsmData`] to accumulate merged results into.
 fn empty_osm_data() -> OsmData {
-    OsmData::new(
-        HashMap::new(),
-        Vec::new(),
-        Vec::new(),
-        None,
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-    )
+    OsmData::default()
 }
 
 /// Fetch + cache + parse a single Overture theme/CLI-type pair (QA-007).
