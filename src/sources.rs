@@ -17,6 +17,8 @@ use anyhow::Result;
 
 #[cfg(feature = "blocking")]
 use crate::bbox::BBox;
+#[cfg(feature = "blocking")]
+use crate::ProgressFn;
 use crate::filter::FeatureFilter;
 use crate::osm::{FeatureSource, OsmData, OsmPoiNode, POI_TAG_KEYS};
 use crate::overture::OvertureParams;
@@ -411,42 +413,24 @@ pub fn merge_source_data(
 }
 
 #[cfg(feature = "blocking")]
-fn emit_progress(
-    progress_cb: &mut dyn FnMut(f32, &str),
-    last_progress: &mut f32,
-    pct: f32,
-    message: &str,
-) {
-    let pct = if pct.is_finite() {
-        pct.clamp(0.0, 1.0)
-    } else {
-        *last_progress
-    };
-    if pct >= *last_progress {
-        *last_progress = pct;
-        progress_cb(pct, message);
-    }
-}
-
-#[cfg(feature = "blocking")]
 pub(crate) fn fetch_map_data_with_fetchers<FetchOsm, FetchOverture>(
     bbox: &BBox,
     options: &SourceOptions,
-    progress_cb: &mut dyn FnMut(f32, &str),
+    progress_cb: ProgressFn<'_>,
     mut fetch_osm: FetchOsm,
     mut fetch_overture: FetchOverture,
 ) -> Result<SourceFetchResult>
 where
     FetchOsm: FnMut(&BBox, &FeatureFilter, bool, &str) -> Result<OsmData>,
     FetchOverture:
-        FnMut(&BBox, &OvertureParams, &mut dyn FnMut(f32, &str)) -> Result<OsmData>,
+        FnMut(&BBox, &OvertureParams, crate::ProgressFn<'_>) -> Result<OsmData>,
 {
     const OSM_DONE_PROGRESS: f32 = 0.45;
     const OVERTURE_DONE_PROGRESS: f32 = 0.90;
     const MERGE_PROGRESS: f32 = 0.95;
 
     let mut last_progress = 0.0;
-    emit_progress(progress_cb, &mut last_progress, 0.0, "Fetching OSM data…");
+    crate::emit_progress(progress_cb, &mut last_progress, 0.0, "Fetching OSM data…");
     let default_url = crate::overpass::default_overpass_url();
     let overpass_url = match options.overpass_url.as_deref() {
         Some(url) => url,
@@ -460,7 +444,7 @@ where
     )?;
 
     let overture_data = if options.overture.enabled {
-        emit_progress(
+        crate::emit_progress(
             progress_cb,
             &mut last_progress,
             OSM_DONE_PROGRESS,
@@ -474,7 +458,7 @@ where
                 0.0
             };
             let mapped = OSM_DONE_PROGRESS + pct * (OVERTURE_DONE_PROGRESS - OSM_DONE_PROGRESS);
-            emit_progress(progress_cb, &mut last_progress, mapped, message);
+            crate::emit_progress(progress_cb, &mut last_progress, mapped, message);
         };
         match fetch_overture(bbox, &overture_params, &mut overture_progress) {
             Ok(data) => Some(data),
@@ -486,20 +470,20 @@ where
                 );
                 let mut result = merge_source_data(osm_data, None, options.poi_source_mode);
                 result.warnings.push(warning);
-                emit_progress(
+                crate::emit_progress(
                     progress_cb,
                     &mut last_progress,
                     MERGE_PROGRESS,
                     "Merging map data…",
                 );
                 result.data.clip_to_bbox(bbox.swne());
-                emit_progress(progress_cb, &mut last_progress, 1.0, "Map data ready");
+                crate::emit_progress(progress_cb, &mut last_progress, 1.0, "Map data ready");
                 return Ok(result);
             }
             Err(err) => return Err(err),
         }
     } else {
-        emit_progress(
+        crate::emit_progress(
             progress_cb,
             &mut last_progress,
             OVERTURE_DONE_PROGRESS,
@@ -508,7 +492,7 @@ where
         None
     };
 
-    emit_progress(
+    crate::emit_progress(
         progress_cb,
         &mut last_progress,
         MERGE_PROGRESS,
@@ -516,7 +500,7 @@ where
     );
     let mut result = merge_source_data(osm_data, overture_data, options.poi_source_mode);
     result.data.clip_to_bbox(bbox.swne());
-    emit_progress(progress_cb, &mut last_progress, 1.0, "Map data ready");
+    crate::emit_progress(progress_cb, &mut last_progress, 1.0, "Map data ready");
     Ok(result)
 }
 
@@ -558,7 +542,7 @@ where
 pub fn fetch_map_data(
     bbox: &BBox,
     options: &SourceOptions,
-    progress_cb: &mut dyn FnMut(f32, &str),
+    progress_cb: ProgressFn<'_>,
 ) -> Result<SourceFetchResult> {
     fetch_map_data_with_fetchers(
         bbox,

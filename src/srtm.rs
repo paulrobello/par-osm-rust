@@ -306,8 +306,12 @@ fn download_tile_with_retry(lat: i32, lon: i32, dest_dir: &Path, max_retries: u3
 /// Download all SRTM tiles needed to cover the given bounding box into
 /// `dest_dir`.
 ///
-/// `progress_cb` is called before each tile with `(tile_index, total_tiles,
-/// tile_name)` so callers can report progress.
+/// ARC-108 (0.3.0): `progress_cb` now follows the crate-wide `ProgressFn`
+/// contract — a fraction in `0.0..=1.0` and a human-readable message. The
+/// prior raw `(tile_index, total_tiles, tile_name)` callback is mapped
+/// internally: `done/total → fraction` and `"SRTM tile {name} ({i+1}/{total})"`
+/// into the message string. The fraction is monotonic (clamped + guarded by
+/// the shared `emit_progress` helper).
 ///
 /// Each tile is retried up to 3 times with exponential backoff (1 s, 2 s).
 /// If any tile fails all retries the function returns an error — the caller
@@ -323,7 +327,7 @@ fn download_tile_with_retry(lat: i32, lon: i32, dest_dir: &Path, max_retries: u3
 pub fn download_tiles_for_bbox(
     bbox: &BBox,
     dest_dir: &Path,
-    progress_cb: &dyn Fn(usize, usize, &str),
+    progress_cb: crate::ProgressFn<'_>,
 ) -> Result<usize> {
     let tiles = tiles_for_bbox(bbox)?;
     let total = tiles.len();
@@ -337,10 +341,14 @@ pub fn download_tiles_for_bbox(
 
     let mut downloaded = 0usize;
     let mut failed: Vec<String> = Vec::new();
+    let mut last_progress = 0.0f32;
 
     for (i, (lat, lon)) in tiles.iter().enumerate() {
         let name = tile_name(*lat, *lon);
-        progress_cb(i, total, &name);
+        // ARC-108: map raw counts to the shared ProgressFn contract.
+        let fraction = i as f32 / total as f32;
+        let message = format!("SRTM tile {name} ({}/{total})", i + 1);
+        crate::emit_progress(progress_cb, &mut last_progress, fraction, &message);
         match download_tile_with_retry(*lat, *lon, dest_dir, 3) {
             Ok(true) => downloaded += 1,
             Ok(false) => {}
@@ -360,6 +368,8 @@ pub fn download_tiles_for_bbox(
         );
     }
 
+    // ARC-108: pin progress to 1.0 on success so callers observe completion.
+    crate::emit_progress(progress_cb, &mut last_progress, 1.0, "SRTM tiles ready");
     log::info!("Elevation tiles ready ({downloaded} new, {total} total)");
     Ok(downloaded)
 }

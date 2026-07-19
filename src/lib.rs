@@ -65,6 +65,42 @@
 // `cargo clippy -- -D warnings`, so the gate stays green by construction.
 #![warn(missing_docs)]
 
+/// Shared progress-callback contract (ARC-108, 0.3.0).
+///
+/// Every public API that reports progress takes `ProgressFn<'a>` instead of
+/// spelling out the `&'a mut dyn FnMut(f32, &str)` shape per call site. The
+/// `f32` argument is a fraction in `0.0..=1.0` (clamped by the caller); the
+/// `&str` is a human-readable status message.
+pub type ProgressFn<'a> = &'a mut dyn FnMut(f32, &str);
+
+/// Clamp a progress fraction to `[0.0, 1.0]` and enforce monotonic increase
+/// before forwarding to `progress_cb` (ARC-108).
+///
+/// Non-finite values (NaN/±∞) fall back to the last reported value so a
+/// buggy fraction never moves progress backwards. Equal-or-higher values
+/// pass through; lower values are silently dropped (the last reported value
+/// is kept).
+///
+/// `last_progress` is the caller's running monotonic cursor — each call site
+/// keeps its own local so the clamp is per-fetch, not process-wide.
+#[cfg(feature = "blocking")]
+pub(crate) fn emit_progress(
+    progress_cb: &mut dyn FnMut(f32, &str),
+    last_progress: &mut f32,
+    pct: f32,
+    message: &str,
+) {
+    let pct = if pct.is_finite() {
+        pct.clamp(0.0, 1.0)
+    } else {
+        *last_progress
+    };
+    if pct >= *last_progress {
+        *last_progress = pct;
+        progress_cb(pct, message);
+    }
+}
+
 // DOC-011: pull README.md into the doctest suite so the ```rust,no_run
 // examples compile under `cargo test --doc --all-features`. Any drift
 // between the README snippets and the real API becomes a CI failure instead

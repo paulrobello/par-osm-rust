@@ -304,10 +304,11 @@ use par_osm_rust::{bbox::BBox, elevation::ElevationData, srtm};
 
 fn main() -> anyhow::Result<()> {
     let bbox = BBox::new(38.0, -121.0, 38.01, -120.99)?; // south, west, north, east
+    let mut progress = |_: f32, _: &str| {};
     srtm::download_tiles_for_bbox(
         &bbox,
         &srtm::cache_dir(),
-        &|_, _, _| {},
+        &mut progress,
     )?;
 
     // Load one tile or a directory of .hgt files, then sample bilinearly.

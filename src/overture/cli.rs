@@ -444,7 +444,7 @@ fn fetch_one_theme(
 pub fn fetch_overture_data(
     bbox: &BBox,
     params: &OvertureParams,
-    progress_cb: &mut dyn FnMut(f32, &str),
+    progress_cb: crate::ProgressFn<'_>,
 ) -> Result<OsmData> {
     fetch_overture_with_policy(bbox, params, progress_cb, FailurePolicy::FailFast)
 }
@@ -462,7 +462,7 @@ pub fn fetch_overture_data(
 pub fn fetch_overture_data_best_effort(
     bbox: &BBox,
     params: &OvertureParams,
-    progress_cb: &mut dyn FnMut(f32, &str),
+    progress_cb: crate::ProgressFn<'_>,
 ) -> OsmData {
     match fetch_overture_with_policy(bbox, params, progress_cb, FailurePolicy::BestEffort) {
         Ok(data) => data,
@@ -504,7 +504,7 @@ enum FailurePolicy {
 fn fetch_overture_with_policy(
     bbox: &BBox,
     params: &OvertureParams,
-    progress_cb: &mut dyn FnMut(f32, &str),
+    progress_cb: crate::ProgressFn<'_>,
     policy: FailurePolicy,
 ) -> Result<OsmData> {
     if !params.enabled {
