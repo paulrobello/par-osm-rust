@@ -348,7 +348,7 @@ pub fn fetch_osm_data(
 
     if use_cache {
         if let Some(xml) = crate::osm_cache::read_for_url(&key, overpass_url) {
-            log::info!("Cache hit for key {}", &key[..8]);
+            log::info!("Cache hit for key {}", &key.as_str()[..8]);
             return crate::osm::parse_osm_xml_str(&xml);
         }
         // Second-chance: containment lookup

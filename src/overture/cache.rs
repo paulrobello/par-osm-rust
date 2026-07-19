@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use crate::bbox::BBox;
-use crate::cache_store::{CacheMeta as CacheMetaTrait, RawCache, to_hex};
+use crate::cache_store::{CacheMeta as CacheMetaTrait, Key, RawCache, to_hex};
 
 // ARC-102: `ThemePriority` is deprecated (never implemented; will be
 // removed in 0.3.0). Still imported so `OvertureParams::priority` and
@@ -206,13 +206,13 @@ pub fn overture_cache_dir() -> PathBuf {
 ///
 /// Coordinates are snapped to 4 decimal places (~11 m) so small UI drags
 /// reuse the same entry.
-pub fn overture_cache_key(bbox: &BBox, cli_type: &str) -> String {
+pub fn overture_cache_key(bbox: &BBox, cli_type: &str) -> Key {
     let canonical = format!(
         "overture|{:.4},{:.4},{:.4},{:.4}|{cli_type}",
         bbox.south, bbox.west, bbox.north, bbox.east
     );
     let hash = Sha256::digest(canonical.as_bytes());
-    to_hex(&hash)
+    Key::from_sha256_hex(to_hex(&hash))
 }
 
 /// Build a version-aware SHA-256 cache key (ARC-001).
@@ -229,7 +229,7 @@ pub fn overture_cache_key_with_version(
     bbox: &BBox,
     cli_type: &str,
     cli_version: &str,
-) -> String {
+) -> Key {
     let version = if cli_version.is_empty() {
         "unknown"
     } else {
@@ -240,7 +240,7 @@ pub fn overture_cache_key_with_version(
         bbox.south, bbox.west, bbox.north, bbox.east
     );
     let hash = Sha256::digest(canonical.as_bytes());
-    to_hex(&hash)
+    Key::from_sha256_hex(to_hex(&hash))
 }
 
 /// Return cached GeoJSON for `key`, or `None` if absent, unreadable, or older
@@ -256,7 +256,7 @@ pub fn overture_cache_key_with_version(
 /// crate's [`overture_cache_key`] / [`overture_cache_key_with_version`]
 /// produce SHA-256 hex digests that satisfy this. An out-of-alphabet key
 /// yields `None` (no path is built, no file touched).
-pub fn overture_cache_read(dir: &Path, key: &str, ttl: Option<Duration>) -> Option<String> {
+pub fn overture_cache_read(dir: &Path, key: &Key, ttl: Option<Duration>) -> Option<String> {
     let cache = raw_cache(dir);
     if let Some(ttl) = ttl {
         let meta = cache.read_meta(key);
@@ -312,7 +312,7 @@ pub fn overture_cache_read(dir: &Path, key: &str, ttl: Option<Duration>) -> Opti
 /// fails, or if any I/O step in the atomic write-then-rename protocol fails.
 pub fn overture_cache_write(
     dir: &Path,
-    key: &str,
+    key: &Key,
     bbox: &BBox,
     cli_type: &str,
     cli_version: &str,

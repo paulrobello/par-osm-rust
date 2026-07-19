@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use url::Url;
 
 use crate::bbox::BBox;
-use crate::cache_store::{CacheMeta as CacheMetaTrait, RawCache, to_hex};
+use crate::cache_store::{CacheMeta as CacheMetaTrait, Key, RawCache, to_hex};
 use crate::filter::FeatureFilter;
 
 // ── Schema versions ────────────────────────────────────────────────────────
@@ -115,7 +115,7 @@ pub fn cache_dir() -> PathBuf {
     since = "0.2.0",
     note = "use the URL-aware `cache_key_for_url` instead; legacy keys do not isolate by Overpass endpoint"
 )]
-pub fn cache_key(bbox: &BBox, filter: &FeatureFilter) -> String {
+pub fn cache_key(bbox: &BBox, filter: &FeatureFilter) -> Key {
     let canonical = format!(
         "v{}|{:.4},{:.4},{:.4},{:.4}|roads={},buildings={},water={},landuse={},railways={}",
         CACHE_SCHEMA_VERSION,
@@ -130,7 +130,7 @@ pub fn cache_key(bbox: &BBox, filter: &FeatureFilter) -> String {
         u8::from(filter.railways),
     );
     let hash = Sha256::digest(canonical.as_bytes());
-    to_hex(&hash)
+    Key::from_sha256_hex(to_hex(&hash))
 }
 
 /// Build a deterministic URL-aware SHA-256 cache key from bounding box,
@@ -145,7 +145,7 @@ pub fn cache_key_for_url(
     bbox: &BBox,
     filter: &FeatureFilter,
     overpass_url: &str,
-) -> String {
+) -> Key {
     let source = canonical_overpass_url(overpass_url);
     let canonical = format!(
         "{URL_AWARE_CACHE_PREFIX}-v{URL_AWARE_CACHE_SCHEMA_VERSION}|{source}|{:.4},{:.4},{:.4},{:.4}|roads={},buildings={},water={},landuse={},railways={}",
@@ -160,7 +160,7 @@ pub fn cache_key_for_url(
         u8::from(filter.railways),
     );
     let hash = Sha256::digest(canonical.as_bytes());
-    to_hex(&hash)
+    Key::from_sha256_hex(to_hex(&hash))
 }
 
 fn canonical_overpass_url(overpass_url: &str) -> String {
@@ -198,15 +198,12 @@ fn canonical_overpass_url(overpass_url: &str) -> String {
     since = "0.2.0",
     note = "use the URL-aware `read_for_url` instead; legacy reads do not isolate by Overpass endpoint"
 )]
-pub fn read(key: &str) -> Option<String> {
+pub fn read(key: &Key) -> Option<String> {
     read_from(&cache_dir(), key)
 }
 
 /// Return cached XML for `key` only when its metadata matches `overpass_url`.
-///
-/// `key` must match the cache's `[0-9a-zA-Z_-]` alphabet (SEC-105); an
-/// invalid key yields `None`.
-pub fn read_for_url(key: &str, overpass_url: &str) -> Option<String> {
+pub fn read_for_url(key: &Key, overpass_url: &str) -> Option<String> {
     read_from_for_url(&cache_dir(), key, overpass_url)
 }
 
@@ -231,7 +228,7 @@ pub fn read_for_url(key: &str, overpass_url: &str) -> Option<String> {
     note = "use the URL-aware `write_for_url` instead; legacy writes do not record the Overpass endpoint"
 )]
 pub fn write(
-    key: &str,
+    key: &Key,
     bbox: &BBox,
     filter: &FeatureFilter,
     xml: &str,
@@ -249,7 +246,7 @@ pub fn write(
 /// Returns `Err` if `key` fails the alphabet check, if metadata serialization
 /// fails, or if any I/O step in the atomic write-then-rename protocol fails.
 pub fn write_for_url(
-    key: &str,
+    key: &Key,
     bbox: &BBox,
     filter: &FeatureFilter,
     xml: &str,
@@ -281,11 +278,11 @@ pub fn clear(min_age: Option<chrono::Duration>) -> Result<usize> {
 // Keeping the `&Path`-based private signatures preserves the public API and
 // the test helpers while collapsing the duplicated logic into one place.
 
-fn read_from(dir: &std::path::Path, key: &str) -> Option<String> {
+fn read_from(dir: &std::path::Path, key: &Key) -> Option<String> {
     raw_cache(dir).read_data(key)
 }
 
-fn read_from_for_url(dir: &std::path::Path, key: &str, overpass_url: &str) -> Option<String> {
+fn read_from_for_url(dir: &std::path::Path, key: &Key, overpass_url: &str) -> Option<String> {
     let source = canonical_overpass_url(overpass_url);
     if meta_matches_overpass_url(dir, key, &source) {
         read_from(dir, key)
@@ -296,7 +293,7 @@ fn read_from_for_url(dir: &std::path::Path, key: &str, overpass_url: &str) -> Op
 
 fn write_to(
     dir: &std::path::Path,
-    key: &str,
+    key: &Key,
     bbox: &BBox,
     filter: &FeatureFilter,
     xml: &str,
@@ -306,7 +303,7 @@ fn write_to(
 
 fn write_to_for_url(
     dir: &std::path::Path,
-    key: &str,
+    key: &Key,
     bbox: &BBox,
     filter: &FeatureFilter,
     xml: &str,
@@ -318,7 +315,7 @@ fn write_to_for_url(
 
 fn write_to_with_overpass_url(
     dir: &std::path::Path,
-    key: &str,
+    key: &Key,
     bbox: &BBox,
     filter: &FeatureFilter,
     xml: &str,
@@ -340,11 +337,11 @@ fn write_to_with_overpass_url(
     raw_cache(dir).write(key, xml, &meta)
 }
 
-fn read_meta_from(dir: &std::path::Path, key: &str) -> Option<CacheMeta> {
+fn read_meta_from(dir: &std::path::Path, key: &Key) -> Option<CacheMeta> {
     raw_cache(dir).read_meta(key)
 }
 
-fn meta_matches_overpass_url(dir: &std::path::Path, key: &str, canonical_url: &str) -> bool {
+fn meta_matches_overpass_url(dir: &std::path::Path, key: &Key, canonical_url: &str) -> bool {
     matches!(
         read_meta_from(dir, key).and_then(|meta| meta.overpass_url),
         Some(source) if source == canonical_url
@@ -418,7 +415,10 @@ fn find_containing_in(
         let contained = cs <= bbox.south && cw <= bbox.west && cn >= bbox.north && ce >= bbox.east;
         let filter_matches = entry.filter == *filter;
         if contained && filter_matches {
-            return read_from(dir, &entry.key);
+            let key = Key::new(&entry.key)
+                .map_err(|e| anyhow::anyhow!("listed entry key failed re-validation: {e}"))
+                .ok()?;
+            return read_from(dir, &key);
         }
     }
     None
@@ -443,7 +443,22 @@ fn find_containing_in_for_url(
         let filter_matches = meta.filter == *filter;
         let source_matches = meta.overpass_url.as_deref() == Some(source.as_str());
         if contained && filter_matches && source_matches {
-            return read_from(dir, &key);
+            // ARC-113/SEC-105: keys on disk are written by this crate and
+            // satisfy the alphabet by construction; `Key::new` is the
+            // re-validation that turns the loaded `String` back into the
+            // type-safe boundary. An entry that fails re-validation is
+            // treated as a cache miss (logged at warn) rather than
+            // propagated as an error from a containment lookup.
+            let validated = match Key::new(&key) {
+                Ok(k) => k,
+                Err(e) => {
+                    log::warn!(
+                        "osm_cache: listed entry key {key:?} failed re-validation: {e}; skipping"
+                    );
+                    continue;
+                }
+            };
+            return read_from(dir, &validated);
         }
     }
     None
@@ -499,7 +514,7 @@ mod tests {
         let k1 = cache_key(&bbox, &all_on());
         let k2 = cache_key(&bbox, &all_on());
         assert_eq!(k1, k2);
-        assert_eq!(k1.len(), 64, "SHA-256 hex should be 64 chars");
+        assert_eq!(k1.as_str().len(), 64, "SHA-256 hex should be 64 chars");
     }
 
     #[test]
@@ -541,7 +556,7 @@ mod tests {
             " https://overpass-api.de:443/api/interpreter#ignored ",
         );
         assert_eq!(k1, k2);
-        assert_ne!(k1, cache_key(&bbox, &all_on()));
+        assert_ne!(k1.as_str(), cache_key(&bbox, &all_on()).as_str());
     }
 
     #[test]
@@ -586,23 +601,23 @@ mod tests {
     #[test]
     fn write_then_read_roundtrip() {
         let tmp = with_cache_dir();
-        let key = "testkey123";
+        let key = Key::new("testkey123").unwrap();
         let xml = "<osm><node id='1'/></osm>";
         let bbox = BBox::from((51.5_f64, -0.13_f64, 51.52_f64, -0.10_f64));
 
-        write_to(tmp.path(), key, &bbox, &FeatureFilter::default(), xml).unwrap();
-        let got = read_from(tmp.path(), key);
+        write_to(tmp.path(), &key, &bbox, &FeatureFilter::default(), xml).unwrap();
+        let got = read_from(tmp.path(), &key);
         assert_eq!(got.as_deref(), Some(xml));
     }
 
     #[test]
     fn clear_all_removes_both_files() {
         let tmp = with_cache_dir();
-        let key = "aabbcc";
+        let key = Key::new("aabbcc").unwrap();
         let bbox = BBox::from((51.5, -0.13, 51.52, -0.10));
         write_to(
             tmp.path(),
-            key,
+            &key,
             &bbox,
             &FeatureFilter::default(),
             "<osm/>",
@@ -685,7 +700,9 @@ mod tests {
         // that as a miss (the data file is absent), and `list_areas_in` must
         // skip it.
         let tmp = with_cache_dir();
-        let key = "orphankey0000000000000000000000000000000000000000000000000000ff";
+        let key = Key::new("orphankey0000000000000000000000000000000000000000000000000000ff")
+            .unwrap();
+        let key_str = key.as_str();
 
         // Hand-write only the meta sidecar — no .xml data file.
         let meta = CacheMeta {
@@ -695,16 +712,16 @@ mod tests {
             size_bytes: 42,
             overpass_url: None,
         };
-        let meta_path = tmp.path().join(format!("{key}.meta.json"));
+        let meta_path = tmp.path().join(format!("{key_str}.meta.json"));
         std::fs::write(&meta_path, serde_json::to_string(&meta).unwrap()).unwrap();
 
         assert!(
-            read_from(tmp.path(), key).is_none(),
+            read_from(tmp.path(), &key).is_none(),
             "meta-without-data orphan must miss on read"
         );
         let listed = list_areas_in(tmp.path());
         assert!(
-            listed.iter().all(|e| e.key != key),
+            listed.iter().all(|e| e.key != key_str),
             "meta-without-data orphan must not appear in list_areas_in"
         );
     }

@@ -28,11 +28,9 @@ use std::path::{Path, PathBuf};
 /// API misuse. Empty keys are rejected because they would collide with the
 /// extension-only filenames this module produces.
 ///
-/// The crate's internal callers always pass a 64-character lowercase SHA-256
-/// hex digest, which trivially satisfies this check; the validation is the
-/// public-API contract that protects a downstream app that hands an
-/// untrusted string to [`osm_cache`](crate::osm_cache) /
-/// [`overture`](crate::overture) functions forwarding to [`RawCache`].
+/// Backs the [`Key::new`] constructor. Kept as a `pub(crate)` free function
+/// so internal callers can re-run the check on raw strings without
+/// constructing a [`Key`].
 ///
 /// # Errors
 ///
@@ -50,6 +48,75 @@ fn validate_key(key: &str) -> Result<()> {
         anyhow::bail!("cache key {key:?} contains a character outside [0-9a-zA-Z_-] (SEC-105)");
     }
     Ok(())
+}
+
+/// Validated cache-key newtype (SEC-105, ARC-113-bound work — 0.3.0).
+///
+/// A `Key` is the type-safe boundary for every cache-entry path. The
+/// SEC-105 alphabet (`[0-9a-zA-Z_-]`, non-empty) is enforced by
+/// [`Key::new`]; once a `Key` exists, no runtime re-check is needed at any
+/// call site that takes `&Key`. Internal helpers that produce SHA-256 hex
+/// output use the crate-private `Key::from_sha256_hex` constructor to wrap
+/// the already-valid result.
+///
+/// # Examples
+///
+/// ```
+/// use par_osm_rust::cache_store::Key;
+///
+/// let key = Key::new("deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")?;
+/// assert_eq!(key.as_str(), "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
+///
+/// // Traversal-shaped strings fail the alphabet check.
+/// assert!(Key::new("../evil").is_err());
+/// assert!(Key::new("").is_err());
+/// # Ok::<(), anyhow::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Key(String);
+
+impl Key {
+    /// Construct a validated [`Key`] from a string slice.
+    ///
+    /// Runs the SEC-105 alphabet check (non-empty, `[0-9a-zA-Z_-]` only)
+    /// so the result is always a path-safe cache key. At public API
+    /// boundaries that receive untrusted input, prefer this constructor.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if `s` is empty or contains any byte outside the
+    /// alphabet (transitively rejects `/`, `\`, `..`, spaces, `NUL`).
+    pub fn new(s: &str) -> Result<Self> {
+        validate_key(s)?;
+        Ok(Self(s.to_string()))
+    }
+
+    /// Wrap an already-validated SHA-256 hex digest into a [`Key`] without
+    /// re-running the alphabet check.
+    ///
+    /// Internal use only — the crate's `cache_key*` / `overture_cache_key*`
+    /// helpers produce lowercase-hex SHA-256 digests that trivially satisfy
+    /// the SEC-105 alphabet, so wrapping their output via this constructor
+    /// avoids a redundant scan. The debug assertion catches a future caller
+    /// that hands in an unvalidated string.
+    pub(crate) fn from_sha256_hex(hex: String) -> Self {
+        debug_assert!(
+            validate_key(&hex).is_ok(),
+            "from_sha256_hex called with non-alphabet input: {hex:?}"
+        );
+        Self(hex)
+    }
+
+    /// Borrow the validated key string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for Key {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 /// Marker trait for a cache entry's metadata sidecar.
@@ -143,18 +210,11 @@ impl<Meta: CacheMeta> RawCache<Meta> {
     /// (e.g. URL or TTL matching) should pair this with [`read_meta`](Self::read_meta)
     /// and apply the check themselves before consuming the payload.
     ///
-    /// Returns `None` if `key` fails the `[0-9a-zA-Z_-]` alphabet check
-    /// (SEC-105) — an invalid key is treated as a miss so a malicious caller
-    /// learns nothing about the filesystem from the return value.
-    pub fn read_data(&self, key: &str) -> Option<String> {
-        // SEC-105: validate before path construction. A miss (None) is the
-        // safe result for an invalid key: no path is built, no file is
-        // touched, no information is leaked.
-        if validate_key(key).is_err() {
-            log::debug!("cache read_data rejected invalid key {key:?} (SEC-105)");
-            return None;
-        }
-        let path = self.data_path(key);
+    /// SEC-105 (0.3.0): `key` arrives as the validated [`Key`] newtype, so
+    /// the alphabet check is enforced at construction time and is not
+    /// re-run here.
+    pub fn read_data(&self, key: &Key) -> Option<String> {
+        let path = self.data_path(key.as_str());
         match std::fs::read_to_string(&path) {
             Ok(s) => Some(s),
             Err(e) => {
@@ -166,15 +226,8 @@ impl<Meta: CacheMeta> RawCache<Meta> {
 
     /// Read and deserialize the meta sidecar for `key`, or `None` if the
     /// sidecar is absent or malformed.
-    ///
-    /// Returns `None` if `key` fails the `[0-9a-zA-Z_-]` alphabet check
-    /// (SEC-105).
-    pub fn read_meta(&self, key: &str) -> Option<Meta> {
-        if validate_key(key).is_err() {
-            log::debug!("cache read_meta rejected invalid key {key:?} (SEC-105)");
-            return None;
-        }
-        let path = self.meta_path(key);
+    pub fn read_meta(&self, key: &Key) -> Option<Meta> {
+        let path = self.meta_path(key.as_str());
         let raw = std::fs::read_to_string(&path).ok()?;
         serde_json::from_str::<Meta>(&raw).ok()
     }
@@ -196,17 +249,14 @@ impl<Meta: CacheMeta> RawCache<Meta> {
     /// the atomicity the QA-012 protocol depends on is preserved. The
     /// meta-first/data-last ordering is unchanged.
     ///
+    /// SEC-105 (0.3.0): `key` is the validated [`Key`] newtype; the alphabet
+    /// check is enforced at construction time and is not re-run here.
+    ///
     /// # Errors
     ///
-    /// Returns `Err` if `key` fails the `[0-9a-zA-Z_-]` alphabet check
-    /// (SEC-105), if `meta` cannot be serialized, or if any I/O step fails.
-    pub fn write(&self, key: &str, data: &str, meta: &Meta) -> Result<()> {
+    /// Returns `Err` if `meta` cannot be serialized or if any I/O step fails.
+    pub fn write(&self, key: &Key, data: &str, meta: &Meta) -> Result<()> {
         use std::io::Write;
-
-        // SEC-105: validate up front so an invalid key never reaches the
-        // filesystem. Returning Err (rather than silently no-oping) surfaces
-        // the contract violation loudly on the write path.
-        validate_key(key)?;
 
         // Serialize up front so a malformed meta never leaves a half-written
         // sidecar on disk.
@@ -216,14 +266,14 @@ impl<Meta: CacheMeta> RawCache<Meta> {
         //    rename) to the final path. `persist` consumes the handle, so on
         //    success no cleanup is needed; on failure the NamedTempFile Drop
         //    removes the temp file.
-        let meta_path = self.meta_path(key);
+        let meta_path = self.meta_path(key.as_str());
         let mut meta_tmp = tempfile::NamedTempFile::new_in(&self.dir)?;
         meta_tmp.write_all(meta_json.as_bytes())?;
         meta_tmp.persist(&meta_path)?;
 
         // 2. Data last: NamedTempFile + persist. This is the commit point —
         //    only after this rename are both files visible together.
-        let data_path = self.data_path(key);
+        let data_path = self.data_path(key.as_str());
         let mut data_tmp = tempfile::NamedTempFile::new_in(&self.dir)?;
         data_tmp.write_all(data.as_bytes())?;
         data_tmp.persist(&data_path)?;
@@ -363,9 +413,10 @@ mod tests {
     fn write_then_read_roundtrips() {
         let (_tmp, cache) = open_cache("xml");
         let meta = sample_meta();
-        cache.write("k1", "<osm/>", &meta).expect("write");
-        assert_eq!(cache.read_data("k1").as_deref(), Some("<osm/>"));
-        let read = cache.read_meta("k1").expect("meta present");
+        let key = Key::new("k1").unwrap();
+        cache.write(&key, "<osm/>", &meta).expect("write");
+        assert_eq!(cache.read_data(&key).as_deref(), Some("<osm/>"));
+        let read = cache.read_meta(&key).expect("meta present");
         assert_eq!(read.note, "test");
     }
 
@@ -380,8 +431,9 @@ mod tests {
         let meta_json = serde_json::to_string(&meta).unwrap();
         std::fs::write(cache.meta_path("orphan"), meta_json).unwrap();
 
+        let key = Key::new("orphan").unwrap();
         assert!(
-            cache.read_data("orphan").is_none(),
+            cache.read_data(&key).is_none(),
             "meta-without-data orphan must miss on read"
         );
     }
@@ -394,7 +446,8 @@ mod tests {
         let meta = sample_meta();
 
         // Well-formed entry: both files present.
-        cache.write("good", "{}", &meta).expect("write good");
+        let good = Key::new("good").unwrap();
+        cache.write(&good, "{}", &meta).expect("write good");
 
         // Orphan: meta only.
         let meta_json = serde_json::to_string(&meta).unwrap();
@@ -409,8 +462,9 @@ mod tests {
     fn clear_removes_paired_entries_and_orphan_data() {
         let (_tmp, cache) = open_cache("xml");
         let meta = sample_meta();
+        let paired = Key::new("paired").unwrap();
         cache
-            .write("paired", "<osm/>", &meta)
+            .write(&paired, "<osm/>", &meta)
             .expect("write paired");
 
         // Orphan data file (no meta) — the legacy pre-QA-012 shape.
@@ -438,8 +492,10 @@ mod tests {
             created_at: now - chrono::Duration::minutes(10),
             note: "fresh".to_string(),
         };
-        cache.write("old", "<a/>", &old).expect("write old");
-        cache.write("fresh", "<b/>", &fresh).expect("write fresh");
+        let old_key = Key::new("old").unwrap();
+        let fresh_key = Key::new("fresh").unwrap();
+        cache.write(&old_key, "<a/>", &old).expect("write old");
+        cache.write(&fresh_key, "<b/>", &fresh).expect("write fresh");
 
         let deleted = cache
             .clear(Some(chrono::Duration::hours(1)))
@@ -484,41 +540,39 @@ mod tests {
     }
 
     #[test]
-    fn write_rejects_invalid_key() {
-        let (_tmp, cache) = open_cache("xml");
-        let meta = sample_meta();
-        let result = cache.write("../evil", "<osm/>", &meta);
+    fn key_new_rejects_invalid_alphabet() {
+        // SEC-105 (0.3.0): the `Key` constructor is now the single point of
+        // enforcement. The `RawCache` API no longer needs a runtime check;
+        // an invalid key is unreachable past `Key::new`.
+        assert!(Key::new("../evil").is_err(), "parent dir");
+        assert!(Key::new("a/b").is_err(), "forward slash");
+        assert!(Key::new("a\\b").is_err(), "backslash");
+        assert!(Key::new("a b").is_err(), "space");
+        assert!(Key::new("a\tb").is_err(), "tab");
+        assert!(Key::new("a.b").is_err(), "dot (outside alphabet)");
+        assert!(Key::new("a\0b").is_err(), "NUL byte");
+        assert!(Key::new("").is_err(), "empty");
+    }
+
+    #[test]
+    fn key_new_accepts_alphanumeric_underscore_dash() {
+        assert!(Key::new("abcDEF012").is_ok(), "alphanumeric");
+        assert!(Key::new("a_b-c").is_ok(), "underscore + dash");
+        // The exact shape every internal caller produces.
         assert!(
-            result.is_err(),
-            "write with traversal key must Err, got {result:?}"
-        );
-        // The validator runs before path construction, so the cache directory
-        // is left empty (no `.xml` / `.meta.json` / `.tmp` artifacts).
-        assert!(
-            std::fs::read_dir(cache.dir())
-                .map(|mut it| it.next().is_none())
-                .unwrap_or(true),
-            "cache directory must be empty after rejected write"
+            Key::new("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+                .is_ok(),
+            "64-char lowercase hex"
         );
     }
 
     #[test]
-    fn read_methods_return_none_for_invalid_key() {
-        let (_tmp, cache) = open_cache("xml");
-        // No file created up front — but even if one existed at a traversal
-        // path, the validator short-circuits before path construction.
-        assert!(
-            cache.read_data("../evil").is_none(),
-            "read_data with traversal key must be None"
+    fn key_from_sha256_hex_skips_redundant_validation() {
+        // pub(crate) constructor wrapping known-good hex output.
+        let k = Key::from_sha256_hex(
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string(),
         );
-        assert!(
-            cache.read_meta("a/b").is_none(),
-            "read_meta with separator key must be None"
-        );
-        assert!(
-            cache.read_data("").is_none(),
-            "read_data with empty key must be None"
-        );
+        assert_eq!(k.as_str(), "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
     }
 
     #[test]
@@ -526,10 +580,13 @@ mod tests {
         // The SEC-105 alphabet must not regress the round-trip for the keys
         // the crate actually produces (64-char hex).
         let (_tmp, cache) = open_cache("xml");
-        let key = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+        let key = Key::new(
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        )
+        .expect("valid 64-char hex key");
         let meta = sample_meta();
-        cache.write(key, "<osm/>", &meta).expect("write");
-        assert_eq!(cache.read_data(key).as_deref(), Some("<osm/>"));
+        cache.write(&key, "<osm/>", &meta).expect("write");
+        assert_eq!(cache.read_data(&key).as_deref(), Some("<osm/>"));
     }
 
     // ── QA-113: shared to_hex helper ───────────────────────────────────────

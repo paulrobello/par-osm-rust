@@ -548,7 +548,7 @@ mod tests {
         let k1 = overture_cache_key(&bbox, "building");
         let k2 = overture_cache_key(&bbox, "building");
         assert_eq!(k1, k2);
-        assert_eq!(k1.len(), 64, "SHA-256 hex should be 64 chars");
+        assert_eq!(k1.as_str().len(), 64, "SHA-256 hex should be 64 chars");
     }
 
     #[test]
@@ -565,7 +565,7 @@ mod tests {
         let k1 = overture_cache_key_with_version(&bbox, "building", "0.4.0");
         let k2 = overture_cache_key_with_version(&bbox, "building", "0.4.0");
         assert_eq!(k1, k2);
-        assert_eq!(k1.len(), 64, "SHA-256 hex should be 64 chars");
+        assert_eq!(k1.as_str().len(), 64, "SHA-256 hex should be 64 chars");
     }
 
     #[test]
