@@ -209,10 +209,7 @@ impl OsmData {
     /// assert_eq!(data.iter_ways().count(), 0);
     /// # }
     /// ```
-    #[deprecated(
-        since = "0.3.0",
-        note = "use OsmData::default() + the with_* builder"
-    )]
+    #[deprecated(since = "0.3.0", note = "use OsmData::default() + the with_* builder")]
     pub fn new(
         nodes: HashMap<i64, OsmNode>,
         ways: Vec<OsmWay>,

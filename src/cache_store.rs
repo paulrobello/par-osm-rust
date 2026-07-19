@@ -463,9 +463,7 @@ mod tests {
         let (_tmp, cache) = open_cache("xml");
         let meta = sample_meta();
         let paired = Key::new("paired").unwrap();
-        cache
-            .write(&paired, "<osm/>", &meta)
-            .expect("write paired");
+        cache.write(&paired, "<osm/>", &meta).expect("write paired");
 
         // Orphan data file (no meta) — the legacy pre-QA-012 shape.
         std::fs::write(cache.data_path("orphan"), "<osm/>").unwrap();
@@ -495,7 +493,9 @@ mod tests {
         let old_key = Key::new("old").unwrap();
         let fresh_key = Key::new("fresh").unwrap();
         cache.write(&old_key, "<a/>", &old).expect("write old");
-        cache.write(&fresh_key, "<b/>", &fresh).expect("write fresh");
+        cache
+            .write(&fresh_key, "<b/>", &fresh)
+            .expect("write fresh");
 
         let deleted = cache
             .clear(Some(chrono::Duration::hours(1)))
@@ -560,8 +560,7 @@ mod tests {
         assert!(Key::new("a_b-c").is_ok(), "underscore + dash");
         // The exact shape every internal caller produces.
         assert!(
-            Key::new("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
-                .is_ok(),
+            Key::new("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef").is_ok(),
             "64-char lowercase hex"
         );
     }
@@ -572,7 +571,10 @@ mod tests {
         let k = Key::from_sha256_hex(
             "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string(),
         );
-        assert_eq!(k.as_str(), "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
+        assert_eq!(
+            k.as_str(),
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+        );
     }
 
     #[test]
@@ -580,10 +582,8 @@ mod tests {
         // The SEC-105 alphabet must not regress the round-trip for the keys
         // the crate actually produces (64-char hex).
         let (_tmp, cache) = open_cache("xml");
-        let key = Key::new(
-            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-        )
-        .expect("valid 64-char hex key");
+        let key = Key::new("deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+            .expect("valid 64-char hex key");
         let meta = sample_meta();
         cache.write(&key, "<osm/>", &meta).expect("write");
         assert_eq!(cache.read_data(&key).as_deref(), Some("<osm/>"));

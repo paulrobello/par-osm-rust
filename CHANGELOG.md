@@ -7,7 +7,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Released versions are published to [crates.io](https://crates.io/crates/par-osm-rust).
 
-## [Unreleased]
+## [0.3.0] - 2026-07-18
+
+The 0.3.0 release consolidates six interrelated breaking changes from the
+audit. Every public signature change has a mechanical migration; the
+individual entries below name the migration path. Consumers updating from
+0.2.x should expect to touch every site that constructs an `OsmData`, a
+bounding box, a cache key, or calls into `overpass::fetch_osm_xml` /
+`fetch_osm_data` / `sources::fetch_map_data`.
+
+### Breaking
+
+- **`BBox` newtype for every bbox-taking public signature (ARC-106).**
+  A new `pub struct BBox { south, west, north, east }` (with `Copy`,
+  `PartialEq`, and serde derives) replaces the `(f64, f64, f64, f64)` tuples
+  threaded through `srtm::tiles_for_bbox`/`download_tiles_for_bbox`,
+  `overpass::build_overpass_query`/`fetch_osm_xml`/`fetch_osm_data`,
+  `sources::fetch_map_data(_with_fetchers)` (plus the `FetchOsm`/`FetchOverture`
+  generic bounds), every `osm_cache` cache-key and write/find function, and
+  the `overture::cache` / `overture::cli` entry points. The validating
+  constructor `BBox::new(s,w,n,e) -> Result<BBox>` runs the SEC-104 checks
+  (non-finite / out-of-range / inverted-bound); `BBox::from_unchecked` and
+  the blanket `From<(f64,f64,f64,f64)>` provide mechanical migration for
+  already-validated input. `BBox::wsen()` adapts to the Overture CLI's WSEN
+  ordering. The on-disk `[f64; 4]` cache-meta wire format is unchanged — `BBox`
+  converts at the boundary so existing cache entries remain readable. The
+  `OsmData::bounds` / `with_bounds` / `clip_to_bbox` signatures stay on tuples
+  (not in ARC-106's migration list).
+
+- **`OsmData` full encapsulation + `Default`/builder (ARC-109).** The five
+  remaining public fields (`relations`, `bounds`, `poi_nodes`, `addr_nodes`,
+  `tree_nodes`) are now `pub(crate)`, matching the encapsulation already in
+  place for `nodes`/`ways`/`ways_by_id`. Five new read accessors mirror the
+  existing pattern. `impl Default for OsmData` produces an empty starting
+  point; the `with_nodes`/`with_ways`/`with_relations`/`with_bounds`/
+  `with_poi_nodes`/`with_addr_nodes`/`with_tree_nodes` consume-self builder
+  methods compose naturally. `OsmData::new(...)` is
+  `#[deprecated(since="0.3.0")]`; the crate's own production code migrates to
+  the builder, internal `#[cfg(test)]` modules add `#[allow(deprecated)]` for
+  legacy coverage, and external callers (`tests/integration.rs`, benches,
+  README doctests) migrate to the builder.
+
+- **`OsmRelation::id` populated by parsers, emitted by writer (ARC-113).**
+  `OsmRelation` gains `pub id: i64`, mirroring `OsmWay::id`. Both parsers
+  populate it from `<relation id="…">` (XML) or the PBF `Relation::id` field,
+  with skip-and-warn for missing/unparseable ids and first-wins on duplicates
+  (mirroring QA-101's way-id handling). The XML writer emits the real id when
+  present, falling back to the synthetic `writer_relation_id(idx)` only for
+  id-less synthetic relations. A new round-trip test pins the parse→write→parse
+  preservation of relation ids.
+
+- **Unified `ProgressFn` contract across fetch APIs (ARC-108).** A new
+  `pub type ProgressFn<'a> = &'a mut dyn FnMut(f32, &str)` at the crate root
+  replaces the per-call-site `&mut dyn FnMut(f32, &str)` spellings.
+  `srtm::download_tiles_for_bbox` migrates from the raw
+  `&dyn Fn(usize, usize, &str)` counts callback to `ProgressFn`; the
+  `(i, total)` pair is mapped to a fraction and the tile name flows into a
+  status message of the form `"SRTM tile {name} ({i+1}/{total})"`. The
+  clamping + monotonic-guard `emit_progress` helper moves to the crate root
+  as `pub(crate)` and is used uniformly.
+
+- **Cache `Key` newtype enforces SEC-105 alphabet at the type (0.3.0).**
+  `pub struct Key(String)` in `cache_store` carries the validated-alphabet
+  contract (`[0-9a-zA-Z_-]`, non-empty) as a type, not a runtime check
+  repeated per call. `RawCache::{read_data, read_meta, write}`,
+  `osm_cache::{read, read_for_url, write, write_for_url}`, and
+  `overture::cache::{overture_cache_read, overture_cache_write}` take `&Key`.
+  The `cache_key*` and `overture_cache_key*` helpers return `Key` (was
+  `String`) and wrap their SHA-256 output via the pub(crate)
+  `Key::from_sha256_hex` constructor with no redundant re-validation.
+  `Key::new(s: &str) -> Result<Key>` is the public validating constructor
+  for callers that hand-build keys. List-path defense-in-depth: an entry
+  loaded from disk whose key fails re-validation is treated as a cache miss.
+
+- **Configurable Overpass host allowlist (ARC-107).**
+  `pub fn validate_overpass_url_with_hosts(url: &str, extra_hosts: &[String])`
+  extends the SSRF host allowlist with consumer-supplied hosts (exact match
+  only). **The relaxation is host-only** — HTTPS, no-userinfo, and port-443
+  are enforced unconditionally even for an extra host. `validate_overpass_url`
+  is retained as a thin delegating wrapper that passes `&[]`.
+  `overpass::fetch_osm_xml`/`fetch_osm_data` take a trailing `&[String]`;
+  `sources::SourceOptions` gains `pub extra_allowed_hosts: Vec<String>`
+  (default empty); `sources::fetch_map_data_with_fetchers` threads
+  `&options.extra_allowed_hosts` into the `FetchOsm` callback.
 
 ### Changed
 
@@ -283,7 +365,8 @@ OSM XML/PBF parsing, normalized `OsmData` interchange, SRTM tile download, HGT
 elevation sampling, atomic write-then-rename cache discipline, and the
 `sources::fetch_map_data` orchestration entry point.
 
-[Unreleased]: https://github.com/paulrobello/par-osm-rust/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/paulrobello/par-osm-rust/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/paulrobello/par-osm-rust/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/paulrobello/par-osm-rust/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/paulrobello/par-osm-rust/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/paulrobello/par-osm-rust/compare/v0.1.0...v0.1.1

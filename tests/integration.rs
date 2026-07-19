@@ -186,7 +186,10 @@ fn parse_then_write_then_parse_preserves_full_osm_data() {
     // writer's escaping.
     assert_eq!(second.poi_nodes().len(), 1);
     assert_eq!(
-        second.poi_nodes()[0].tags.get("amenity").map(String::as_str),
+        second.poi_nodes()[0]
+            .tags
+            .get("amenity")
+            .map(String::as_str),
         Some("cafe")
     );
     assert_eq!(
@@ -214,7 +217,10 @@ fn parse_then_write_then_parse_preserves_full_osm_data() {
         Some("multipolygon")
     );
     assert_eq!(
-        second.relations()[0].tags.get("landuse").map(String::as_str),
+        second.relations()[0]
+            .tags
+            .get("landuse")
+            .map(String::as_str),
         Some("park")
     );
     assert_eq!(second.relations()[0].members.len(), 1);
@@ -285,8 +291,7 @@ fn merge_source_data_keeps_distinct_pois_under_both_mode() {
 
     assert_eq!(merged.status, SourceStatus::Both);
     assert_eq!(merged.data.poi_nodes().len(), 2);
-    let sources: Vec<FeatureSource> =
-        merged.data.poi_nodes().iter().map(|p| p.source).collect();
+    let sources: Vec<FeatureSource> = merged.data.poi_nodes().iter().map(|p| p.source).collect();
     assert!(sources.contains(&FeatureSource::Osm));
     assert!(sources.contains(&FeatureSource::Overture));
 }

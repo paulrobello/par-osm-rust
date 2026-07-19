@@ -505,9 +505,7 @@ fn parse_osm_events<R: std::io::BufRead>(mut reader: Reader<R>) -> Result<OsmDat
                                     log::warn!("skipping duplicate relation id {id}")
                                 }
                                 None => {
-                                    log::warn!(
-                                        "skipping relation with missing/invalid id"
-                                    )
+                                    log::warn!("skipping relation with missing/invalid id")
                                 }
                             }
                         }

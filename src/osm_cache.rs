@@ -141,11 +141,7 @@ pub fn cache_key(bbox: &BBox, filter: &FeatureFilter) -> Key {
 /// create duplicate entries. This intentionally uses a distinct schema prefix
 /// from [`cache_key`] so endpoint-specific entries cannot collide with legacy
 /// bbox/filter-only entries.
-pub fn cache_key_for_url(
-    bbox: &BBox,
-    filter: &FeatureFilter,
-    overpass_url: &str,
-) -> Key {
+pub fn cache_key_for_url(bbox: &BBox, filter: &FeatureFilter, overpass_url: &str) -> Key {
     let source = canonical_overpass_url(overpass_url);
     let canonical = format!(
         "{URL_AWARE_CACHE_PREFIX}-v{URL_AWARE_CACHE_SCHEMA_VERSION}|{source}|{:.4},{:.4},{:.4},{:.4}|roads={},buildings={},water={},landuse={},railways={}",
@@ -227,12 +223,7 @@ pub fn read_for_url(key: &Key, overpass_url: &str) -> Option<String> {
     since = "0.2.0",
     note = "use the URL-aware `write_for_url` instead; legacy writes do not record the Overpass endpoint"
 )]
-pub fn write(
-    key: &Key,
-    bbox: &BBox,
-    filter: &FeatureFilter,
-    xml: &str,
-) -> Result<()> {
+pub fn write(key: &Key, bbox: &BBox, filter: &FeatureFilter, xml: &str) -> Result<()> {
     write_to(&cache_dir(), key, bbox, filter, xml)
 }
 
@@ -615,14 +606,7 @@ mod tests {
         let tmp = with_cache_dir();
         let key = Key::new("aabbcc").unwrap();
         let bbox = BBox::from((51.5, -0.13, 51.52, -0.10));
-        write_to(
-            tmp.path(),
-            &key,
-            &bbox,
-            &FeatureFilter::default(),
-            "<osm/>",
-        )
-        .unwrap();
+        write_to(tmp.path(), &key, &bbox, &FeatureFilter::default(), "<osm/>").unwrap();
 
         let deleted = clear_dir(tmp.path(), None).unwrap();
         assert_eq!(deleted, 1);
@@ -700,8 +684,8 @@ mod tests {
         // that as a miss (the data file is absent), and `list_areas_in` must
         // skip it.
         let tmp = with_cache_dir();
-        let key = Key::new("orphankey0000000000000000000000000000000000000000000000000000ff")
-            .unwrap();
+        let key =
+            Key::new("orphankey0000000000000000000000000000000000000000000000000000ff").unwrap();
         let key_str = key.as_str();
 
         // Hand-write only the meta sidecar — no .xml data file.

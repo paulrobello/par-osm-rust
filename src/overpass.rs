@@ -96,8 +96,7 @@ pub fn validate_overpass_url_with_hosts(url: &str, extra_hosts: &[String]) -> Re
         .host_str()
         .ok_or_else(|| anyhow::anyhow!("Overpass URL has no host"))?;
 
-    let allowed = ALLOWED_OVERPASS_HOSTS.contains(&host)
-        || extra_hosts.iter().any(|h| h == host);
+    let allowed = ALLOWED_OVERPASS_HOSTS.contains(&host) || extra_hosts.iter().any(|h| h == host);
     if !allowed {
         bail!(
             "Overpass host '{}' is not in the approved list. \
@@ -392,17 +391,12 @@ pub fn fetch_osm_data(
             bbox.swne()
         );
     } else {
-        log::info!(
-            "Force-fetching from Overpass (bbox {:?})",
-            bbox.swne()
-        );
+        log::info!("Force-fetching from Overpass (bbox {:?})", bbox.swne());
     }
 
     let xml = fetch_osm_xml(bbox, filter, overpass_url, extra_hosts)?;
 
-    if let Err(e) =
-        crate::osm_cache::write_for_url(&key, bbox, filter, &xml, overpass_url)
-    {
+    if let Err(e) = crate::osm_cache::write_for_url(&key, bbox, filter, &xml, overpass_url) {
         log::warn!("Cache write failed: {e}");
     }
 
@@ -496,14 +490,16 @@ mod tests {
     #[test]
     fn invalid_bbox_south_gt_north() {
         let filter = FeatureFilter::default();
-        let result = build_overpass_query(&BBox::from_unchecked(51.52, -0.13, 51.5, -0.10), &filter);
+        let result =
+            build_overpass_query(&BBox::from_unchecked(51.52, -0.13, 51.5, -0.10), &filter);
         assert!(result.is_err(), "should fail when south >= north");
     }
 
     #[test]
     fn invalid_bbox_west_gt_east() {
         let filter = FeatureFilter::default();
-        let result = build_overpass_query(&BBox::from_unchecked(51.5, -0.10, 51.52, -0.13), &filter);
+        let result =
+            build_overpass_query(&BBox::from_unchecked(51.5, -0.10, 51.52, -0.13), &filter);
         assert!(result.is_err(), "should fail when west >= east");
     }
 
@@ -514,26 +510,58 @@ mod tests {
         let filter = FeatureFilter::default();
         // All NaN comparisons are false, so the previous `south >= north`
         // check could not catch NaN; the shared validator's is_finite() does.
-        assert!(build_overpass_query(&BBox::from_unchecked(f64::NAN, -0.13, 51.52, -0.10), &filter).is_err());
-        assert!(build_overpass_query(&BBox::from_unchecked(51.5, f64::NAN, 51.52, -0.10), &filter).is_err());
-        assert!(build_overpass_query(&BBox::from_unchecked(51.5, -0.13, f64::NAN, -0.10), &filter).is_err());
-        assert!(build_overpass_query(&BBox::from_unchecked(51.5, -0.13, 51.52, f64::NAN), &filter).is_err());
+        assert!(
+            build_overpass_query(
+                &BBox::from_unchecked(f64::NAN, -0.13, 51.52, -0.10),
+                &filter
+            )
+            .is_err()
+        );
+        assert!(
+            build_overpass_query(&BBox::from_unchecked(51.5, f64::NAN, 51.52, -0.10), &filter)
+                .is_err()
+        );
+        assert!(
+            build_overpass_query(&BBox::from_unchecked(51.5, -0.13, f64::NAN, -0.10), &filter)
+                .is_err()
+        );
+        assert!(
+            build_overpass_query(&BBox::from_unchecked(51.5, -0.13, 51.52, f64::NAN), &filter)
+                .is_err()
+        );
     }
 
     #[test]
     fn invalid_bbox_infinity_rejected() {
         let filter = FeatureFilter::default();
-        assert!(build_overpass_query(&BBox::from_unchecked(f64::INFINITY, -0.13, 51.52, -0.10), &filter).is_err());
-        assert!(build_overpass_query(&BBox::from_unchecked(51.5, -0.13, 51.52, f64::NEG_INFINITY), &filter).is_err());
+        assert!(
+            build_overpass_query(
+                &BBox::from_unchecked(f64::INFINITY, -0.13, 51.52, -0.10),
+                &filter
+            )
+            .is_err()
+        );
+        assert!(
+            build_overpass_query(
+                &BBox::from_unchecked(51.5, -0.13, 51.52, f64::NEG_INFINITY),
+                &filter
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn invalid_bbox_out_of_range_lat_lon_rejected() {
         let filter = FeatureFilter::default();
         // lat 95 is well-ordered but out of range — previously accepted.
-        assert!(build_overpass_query(&BBox::from_unchecked(95.0, -0.13, 96.0, -0.10), &filter).is_err());
+        assert!(
+            build_overpass_query(&BBox::from_unchecked(95.0, -0.13, 96.0, -0.10), &filter).is_err()
+        );
         // lon 200 likewise.
-        assert!(build_overpass_query(&BBox::from_unchecked(51.5, 199.0, 51.52, 200.0), &filter).is_err());
+        assert!(
+            build_overpass_query(&BBox::from_unchecked(51.5, 199.0, 51.52, 200.0), &filter)
+                .is_err()
+        );
     }
 
     #[test]
@@ -751,9 +779,7 @@ mod tests {
     fn validate_overpass_url_delegates_with_empty_extra_hosts() {
         // The no-args wrapper passes an empty slice; behavior matches the
         // pre-ARC-107 allowlist.
-        assert!(
-            validate_overpass_url("https://overpass-api.de/api/interpreter").is_ok()
-        );
+        assert!(validate_overpass_url("https://overpass-api.de/api/interpreter").is_ok());
         assert!(
             validate_overpass_url("https://private-mirror.example.com/api/interpreter").is_err()
         );

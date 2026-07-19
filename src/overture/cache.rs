@@ -225,11 +225,7 @@ pub fn overture_cache_key(bbox: &BBox, cli_type: &str) -> Key {
 /// The canonical form is `overture|v2|{cli_version}|{s},{w},{n},{e}|{type}`,
 /// distinct from the v1 form, so any pre-existing v1 entries simply miss
 /// (re-fetch) on first read after the upgrade — accepted per ARC-001.
-pub fn overture_cache_key_with_version(
-    bbox: &BBox,
-    cli_type: &str,
-    cli_version: &str,
-) -> Key {
+pub fn overture_cache_key_with_version(bbox: &BBox, cli_type: &str, cli_version: &str) -> Key {
     let version = if cli_version.is_empty() {
         "unknown"
     } else {

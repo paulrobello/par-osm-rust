@@ -243,12 +243,8 @@ mod tests {
         let _path_guard = prepend_to_path(tmp.path());
         let start = Instant::now();
 
-        let err = fetch_geojson_for_type(
-            "place",
-            &BBox::from((51.5, -0.13, 51.52, -0.10)),
-            5,
-        )
-        .expect_err("fake CLI should fail");
+        let err = fetch_geojson_for_type("place", &BBox::from((51.5, -0.13, 51.52, -0.10)), 5)
+            .expect_err("fake CLI should fail");
 
         assert!(
             start.elapsed() < Duration::from_secs(2),
@@ -692,12 +688,9 @@ mod tests {
     #[test]
     fn fetch_geojson_for_type_rejects_argument_injection() {
         // SEC-012: a user-controlled cli_type must not reach the CLI as a flag.
-        let err = fetch_geojson_for_type(
-            "--output=/tmp/evil",
-            &BBox::from((0.0, 0.0, 1.0, 1.0)),
-            1,
-        )
-        .expect_err("dashed cli_type must be rejected before spawn");
+        let err =
+            fetch_geojson_for_type("--output=/tmp/evil", &BBox::from((0.0, 0.0, 1.0, 1.0)), 1)
+                .expect_err("dashed cli_type must be rejected before spawn");
         let msg = err.to_string();
         assert!(
             msg.contains("SEC-012") || msg.contains("argument-injection"),

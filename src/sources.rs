@@ -16,9 +16,9 @@ use std::collections::HashMap;
 use anyhow::Result;
 
 #[cfg(feature = "blocking")]
-use crate::bbox::BBox;
-#[cfg(feature = "blocking")]
 use crate::ProgressFn;
+#[cfg(feature = "blocking")]
+use crate::bbox::BBox;
 use crate::filter::FeatureFilter;
 use crate::osm::{FeatureSource, OsmData, OsmPoiNode, POI_TAG_KEYS};
 use crate::overture::OvertureParams;
@@ -431,8 +431,7 @@ pub(crate) fn fetch_map_data_with_fetchers<FetchOsm, FetchOverture>(
 ) -> Result<SourceFetchResult>
 where
     FetchOsm: FnMut(&BBox, &FeatureFilter, bool, &str, &[String]) -> Result<OsmData>,
-    FetchOverture:
-        FnMut(&BBox, &OvertureParams, crate::ProgressFn<'_>) -> Result<OsmData>,
+    FetchOverture: FnMut(&BBox, &OvertureParams, crate::ProgressFn<'_>) -> Result<OsmData>,
 {
     const OSM_DONE_PROGRESS: f32 = 0.45;
     const OVERTURE_DONE_PROGRESS: f32 = 0.90;

@@ -281,11 +281,7 @@ pub(super) fn validate_cli_type(cli_type: &str) -> Result<()> {
 ///
 /// The GeoJSON string written by the CLI, or an error if the CLI fails or
 /// times out.
-pub fn fetch_geojson_for_type(
-    cli_type: &str,
-    bbox: &BBox,
-    timeout_secs: u64,
-) -> Result<String> {
+pub fn fetch_geojson_for_type(cli_type: &str, bbox: &BBox, timeout_secs: u64) -> Result<String> {
     validate_cli_type(cli_type)?;
 
     // ARC-106: Overture CLI expects WSEN order — `BBox::wsen()` is the
