@@ -193,8 +193,8 @@ pub(crate) fn decode_hgt_gz(gz_bytes: &[u8]) -> Result<Vec<u8>> {
 /// # Errors
 ///
 /// Returns `Err` on HTTP failure, on a response whose announced `Content-Length`
-/// exceeds [`MAX_GZ_RESPONSE_BYTES`] (SEC-101 pre-buffer check), on a payload
-/// whose decompressed size exceeds [`MAX_HGT_BYTES`] or is not one of the two
+/// exceeds `MAX_GZ_RESPONSE_BYTES` (SEC-101 pre-buffer check), on a payload
+/// whose decompressed size exceeds `MAX_HGT_BYTES` or is not one of the two
 /// legal HGT sizes, or on filesystem failure during the atomic write.
 pub fn download_tile(lat: i32, lon: i32, dest_dir: &Path) -> Result<bool> {
     let name = tile_name(lat, lon);

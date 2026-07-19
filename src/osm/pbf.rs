@@ -1,7 +1,8 @@
 //! `.osm.pbf` reader.
 //!
-//! Exposes [`parse_pbf`], which memory-maps a `.osm.pbf` file via `osmpbf`'s
-//! `ElementReader` and folds its elements into an [`OsmData`].
+//! Exposes [`parse_pbf`], which reads a `.osm.pbf` file via `osmpbf`'s
+//! `ElementReader` (backed by `BlobReader` over a `BufReader` — buffered I/O,
+//! not memory-mapped) and folds its elements into an [`OsmData`].
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -79,15 +80,17 @@ fn process_pbf_node(
 /// individual tree positions (nodes carrying `natural=tree`), and the
 /// dataset bounding box computed from the observed node lat/lon extrema.
 ///
-/// # File-provenance precondition (SEC-008)
+/// # I/O model
 ///
-/// `parse_pbf` memory-maps the file at `path` via `osmpbf`'s
-/// `ElementReader::from_path`. The caller MUST ensure the file is not
-/// truncated, replaced, or concurrently modified for the duration of the
-/// call. A mapping whose backing file shrinks underneath the reader can
-/// raise `SIGBUS` when the OS revokes a page that no longer exists. For
-/// untrusted or concurrently-written inputs, copy the file to a stable path
-/// first and parse the copy.
+/// `parse_pbf` reads `path` via `osmpbf`'s `ElementReader::from_path`, which
+/// streams PBF blobs through a `BlobReader` over a `BufReader<File>` —
+/// buffered I/O, not memory-mapped I/O. The advisory RUSTSEC-2026-0186 on
+/// `memmap2` (a transitive dependency of `osmpbf`) is unreachable from this
+/// crate: `osmpbf` only memory-maps when `mmap_blob` is used explicitly, and
+/// the `ElementReader` path taken here never calls it. There is therefore no
+/// `SIGBUS` hazard if the backing file is truncated, replaced, or concurrently
+/// modified for the duration of the call (the reader will return an I/O
+/// error instead).
 ///
 /// # Errors
 ///

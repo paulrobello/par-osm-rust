@@ -141,11 +141,11 @@ fn push_way_from_coords(
 ///
 /// Synthetic negative node IDs are assigned to avoid collision with OSM IDs.
 ///
-/// Constructs a fresh [`OvertureIdAllocator`] for this single call, so two
+/// Constructs a fresh `OvertureIdAllocator` for this single call, so two
 /// parses of identical GeoJSON produce identical ID sequences (ARC-009 /
 /// QA-010). For multi-theme fetches that merge results into one
 /// [`OsmData`], the fetch orchestrator must instead thread a single
-/// allocator through [`parse_overture_geojson_with_allocator`] so the
+/// allocator through `parse_overture_geojson_with_allocator` so the
 /// merged ways/`ways_by_id` invariant cannot be violated by two themes
 /// emitting the same IDs (ARC-101).
 pub fn parse_overture_geojson(geojson_str: &str, theme: OvertureTheme) -> Result<OsmData> {

@@ -143,7 +143,7 @@ fn parse_member_attrs(e: &BytesStart<'_>) -> (String, i64, String) {
 /// Element nesting depth is capped at `MAX_XML_DEPTH` (SEC-004).
 ///
 /// Both [`parse_osm_xml_str`] and [`parse_osm_xml_file`] route through the
-/// same private [`parse_osm_events`] engine (QA-102): the string case
+/// same private `parse_osm_events` engine (QA-102): the string case
 /// constructs `Reader::from_reader(xml.as_bytes())` (a `&[u8]` is
 /// `BufRead`), so the streaming `read_event_into` shape runs against the
 /// slice with no copy of the input. The two entry points are now
@@ -180,7 +180,7 @@ pub fn parse_osm_xml_str(xml: &str) -> Result<OsmData> {
 /// streaming reader requires.
 ///
 /// **Parser semantics are identical to [`parse_osm_xml_str`].** Both entry
-/// points delegate to the same private [`parse_osm_events`] engine
+/// points delegate to the same private `parse_osm_events` engine
 /// (QA-102), so any change to the loop applies to both paths uniformly.
 /// The same single-pass structure runs against the streamed events: nodes,
 /// ways, relations, and `<bounds>` are collected in arrival order

@@ -2,6 +2,7 @@
 //! Overpass API integration: QL query builder and HTTP fetch.
 
 use std::borrow::Cow;
+use std::io::Read;
 
 use anyhow::{Result, bail};
 use reqwest::header::{CONTENT_TYPE, USER_AGENT};
@@ -12,6 +13,17 @@ use crate::osm::OsmData;
 
 const DEFAULT_OVERPASS_URL: &str = "https://overpass-api.de/api/interpreter";
 const OVERPASS_TIMEOUT_SECS: u64 = 60;
+
+/// Upper bound on a successful Overpass response body. Large-area queries
+/// legitimately return hundreds of MB, so the cap is generous (2 GiB); the
+/// fetch bails if the body exceeds it. See SEC-109.
+const MAX_OVERPASS_RESPONSE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Upper bound on bytes read from an Overpass *error* response. Only
+/// [`ERROR_BODY_LIMIT`] bytes are surfaced into the error message after
+/// truncation, so reading more than this would be pure waste; 64 KiB is
+/// comfortably above the truncation window. See SEC-109.
+const MAX_OVERPASS_ERROR_BODY_READ_BYTES: usize = 64 * 1024;
 const OVERPASS_USER_AGENT: &str = concat!(
     env!("CARGO_PKG_NAME"),
     "/",
@@ -111,7 +123,7 @@ pub fn default_overpass_url() -> Cow<'static, str> {
 ///
 /// # Errors
 ///
-/// Returns `Err` if the bbox fails [`crate::bbox::validate_bbox`] (SEC-104):
+/// Returns `Err` if the bbox fails `crate::bbox::validate_bbox` (SEC-104):
 /// non-finite coordinate, latitude outside `[-90, 90]`, longitude outside
 /// `[-180, 180]`, or `south >= north` / `west >= east`. All NaN comparisons
 /// are false, so the explicit `is_finite()` check inside the validator is
@@ -251,6 +263,15 @@ fn shared_client() -> Result<&'static reqwest::blocking::Client> {
 /// - Follows no redirects: any 3xx is treated as an error so a compromised
 ///   allowlisted mirror cannot redirect the POST to an internal host (the
 ///   allowlist is only enforced against the initial URL).
+///
+/// # Errors
+///
+/// Returns `Err` if the successful response body exceeds the internal
+/// `MAX_OVERPASS_RESPONSE_BYTES` cap (2 GiB, SEC-109). The body is read
+/// through a `take(MAX + 1)` adapter so an oversized response is rejected
+/// without buffering it fully; the error path is also bounded at the
+/// internal `MAX_OVERPASS_ERROR_BODY_READ_BYTES` because only a 4 KiB
+/// snippet is surfaced into the error message.
 pub fn fetch_osm_xml(
     bbox: (f64, f64, f64, f64),
     filter: &FeatureFilter,
@@ -269,11 +290,28 @@ pub fn fetch_osm_xml(
     }
     if !res.status().is_success() {
         let status = res.status();
-        let body = truncate_error_body(&res.bytes().unwrap_or_default());
+        // Bound the error body read: only ERROR_BODY_LIMIT bytes are surfaced
+        // after truncation, so reading more than the cap is waste (SEC-109).
+        let mut buf = Vec::new();
+        res.take(MAX_OVERPASS_ERROR_BODY_READ_BYTES as u64)
+            .read_to_end(&mut buf)?;
+        let body = truncate_error_body(&buf);
         bail!("Overpass API error ({status}): {body}");
     }
 
-    Ok(res.text()?)
+    // Bound the success body at MAX + 1 so an oversized response is rejected
+    // without buffering it fully (SEC-109). Overpass returns UTF-8 XML, so
+    // `read_to_string` matches the prior `.text()` decoding behavior.
+    let mut body = String::new();
+    res.take(MAX_OVERPASS_RESPONSE_BYTES + 1)
+        .read_to_string(&mut body)?;
+    if body.len() as u64 > MAX_OVERPASS_RESPONSE_BYTES {
+        bail!(
+            "Overpass response exceeded {MAX_OVERPASS_RESPONSE_BYTES} byte cap \
+             (SEC-109 bound)"
+        );
+    }
+    Ok(body)
 }
 
 fn build_overpass_request(
