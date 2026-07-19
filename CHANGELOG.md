@@ -283,8 +283,8 @@ OSM XML/PBF parsing, normalized `OsmData` interchange, SRTM tile download, HGT
 elevation sampling, atomic write-then-rename cache discipline, and the
 `sources::fetch_map_data` orchestration entry point.
 
-[Unreleased]: https://github.com/paulrobello/par-osm-rust/compare/a104317...HEAD
-[0.2.1]: https://github.com/paulrobello/par-osm-rust/compare/a5e9a57...a104317
-[0.2.0]: https://github.com/paulrobello/par-osm-rust/compare/072c5b2...a5e9a57
-[0.1.1]: https://github.com/paulrobello/par-osm-rust/compare/42c3e49...072c5b2
-[0.1.0]: https://github.com/paulrobello/par-osm-rust/commit/42c3e49
+[Unreleased]: https://github.com/paulrobello/par-osm-rust/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/paulrobello/par-osm-rust/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/paulrobello/par-osm-rust/compare/v0.1.1...v0.2.0
+[0.1.1]: https://github.com/paulrobello/par-osm-rust/compare/v0.1.0...v0.1.1
+[0.1.0]: https://github.com/paulrobello/par-osm-rust/releases/tag/v0.1.0

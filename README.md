@@ -348,16 +348,15 @@ cargo test --all-features
 cargo publish --dry-run
 ```
 
-### Release tags (TODO)
+### Release tags
 
-No `v0.1.0`…`v0.2.1` tags exist yet. Until they are pushed, `CHANGELOG.md`
-points the version-comparison footer links at the release commits directly
-(GitHub compare accepts commit SHAs). When the next release ships, create an
+Annotated tags `v0.1.0` … `v0.2.1` mark each release at its version-bump
+commit, and the `CHANGELOG.md` footer uses the conventional
+`compare/v<old>...v<new>` form. When the next release ships, create an
 annotated tag at the version-bump commit (e.g. `git tag -a v0.2.2 <sha>`) and
 publish it with explicit user confirmation (`git push origin v0.2.2`), then
-repoint the corresponding CHANGELOG footer link from the SHA form to the
-tag form so future comparisons resolve to the conventional
-`compare/v<old>...v<new>` URLs.
+add a `[0.2.2]` footer link of the form
+`compare/v0.2.1...v0.2.2` and repoint `[Unreleased]` to `compare/v0.2.2...HEAD`.
 
 ## Verification
 
