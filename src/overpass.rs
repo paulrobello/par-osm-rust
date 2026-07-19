@@ -46,19 +46,26 @@ const ALLOWED_OVERPASS_HOSTS: &[&str] = &[
     "overpass.osm.ch",
 ];
 
-/// Validate that `url` is a safe Overpass endpoint.
+/// Validate that `url` is a safe Overpass endpoint, optionally extending the
+/// allowlist with consumer-supplied hosts (ARC-107, 0.3.0).
 ///
 /// Rejects any URL that:
 /// - does not use HTTPS,
 /// - includes userinfo,
 /// - specifies a port other than 443 (explicit `:443` or no port both pass), or
-/// - whose host is not in `ALLOWED_OVERPASS_HOSTS`.
+/// - whose host is not in `ALLOWED_OVERPASS_HOSTS` AND not an exact match in
+///   `extra_hosts`.
+///
+/// **The `extra_hosts` relaxation is host-only.** HTTPS, no-userinfo, and
+/// port-443 are enforced unconditionally — adding a host to `extra_hosts`
+/// does NOT relax any other check. The consumer assumes the SSRF exposure
+/// that comes with routing traffic to the added host.
 ///
 /// # Errors
 ///
 /// Returns `Err` with a descriptive message naming the failed check if `url`
 /// cannot be parsed by `Url::parse`, or if it violates any of the rules above.
-pub fn validate_overpass_url(url: &str) -> Result<()> {
+pub fn validate_overpass_url_with_hosts(url: &str, extra_hosts: &[String]) -> Result<()> {
     let parsed =
         Url::parse(url).map_err(|err| anyhow::anyhow!("Invalid Overpass URL '{url}': {err}"))?;
 
@@ -74,7 +81,8 @@ pub fn validate_overpass_url(url: &str) -> Result<()> {
     // explicit `:443` and an omitted port are accepted; any other port is
     // rejected. This tightens the SSRF allowlist so a compromised allowlisted
     // mirror cannot redirect traffic to an unrelated service bound to a
-    // non-443 port on the same host.
+    // non-443 port on the same host. ARC-107: this check is unconditional —
+    // `extra_hosts` only relaxes the host allowlist, not the port guard.
     if let Some(port) = parsed.port()
         && port != 443
     {
@@ -88,16 +96,37 @@ pub fn validate_overpass_url(url: &str) -> Result<()> {
         .host_str()
         .ok_or_else(|| anyhow::anyhow!("Overpass URL has no host"))?;
 
-    if !ALLOWED_OVERPASS_HOSTS.contains(&host) {
+    let allowed = ALLOWED_OVERPASS_HOSTS.contains(&host)
+        || extra_hosts.iter().any(|h| h == host);
+    if !allowed {
         bail!(
             "Overpass host '{}' is not in the approved list. \
-             Allowed hosts: {}",
+             Allowed hosts: {}{}",
             host,
-            ALLOWED_OVERPASS_HOSTS.join(", ")
+            ALLOWED_OVERPASS_HOSTS.join(", "),
+            if extra_hosts.is_empty() {
+                String::new()
+            } else {
+                format!("; extra allowed: {}", extra_hosts.join(", "))
+            }
         );
     }
 
     Ok(())
+}
+
+/// Validate that `url` is a safe Overpass endpoint.
+///
+/// Convenience wrapper around [`validate_overpass_url_with_hosts`] that passes
+/// an empty `extra_hosts` slice — i.e. only the hardcoded allowlist
+/// (`ALLOWED_OVERPASS_HOSTS`) is consulted. Retained for callers that do not
+/// need the ARC-107 extension.
+///
+/// # Errors
+///
+/// See [`validate_overpass_url_with_hosts`].
+pub fn validate_overpass_url(url: &str) -> Result<()> {
+    validate_overpass_url_with_hosts(url, &[])
 }
 
 /// Resolve the Overpass API URL.
@@ -276,8 +305,9 @@ pub fn fetch_osm_xml(
     bbox: &BBox,
     filter: &FeatureFilter,
     overpass_url: &str,
+    extra_hosts: &[String],
 ) -> Result<String> {
-    validate_overpass_url(overpass_url)?;
+    validate_overpass_url_with_hosts(overpass_url, extra_hosts)?;
     let query = build_overpass_query(bbox, filter)?;
 
     let client = shared_client()?;
@@ -343,6 +373,7 @@ pub fn fetch_osm_data(
     filter: &FeatureFilter,
     use_cache: bool,
     overpass_url: &str,
+    extra_hosts: &[String],
 ) -> Result<OsmData> {
     let key = crate::osm_cache::cache_key_for_url(bbox, filter, overpass_url);
 
@@ -367,7 +398,7 @@ pub fn fetch_osm_data(
         );
     }
 
-    let xml = fetch_osm_xml(bbox, filter, overpass_url)?;
+    let xml = fetch_osm_xml(bbox, filter, overpass_url, extra_hosts)?;
 
     if let Err(e) =
         crate::osm_cache::write_for_url(&key, bbox, filter, &xml, overpass_url)
@@ -624,6 +655,107 @@ mod tests {
         assert!(
             validate_overpass_url("https://user:pass@overpass-api.de/api/interpreter").is_err(),
             "userinfo must be rejected even when host is approved"
+        );
+    }
+
+    // ── ARC-107: configurable extra_hosts (host-only relaxation) ────────────
+
+    #[test]
+    fn extra_hosts_accepts_exact_match_on_https_443() {
+        // Adding a host extends the allowlist; HTTPS + 443 still required.
+        let extra = vec!["private-mirror.example.com".to_string()];
+        assert!(
+            validate_overpass_url_with_hosts(
+                "https://private-mirror.example.com/api/interpreter",
+                &extra
+            )
+            .is_ok(),
+            "exact host match in extra_hosts must pass when HTTPS+443 hold"
+        );
+        assert!(
+            validate_overpass_url_with_hosts(
+                "https://private-mirror.example.com:443/api/interpreter",
+                &extra
+            )
+            .is_ok(),
+            "explicit :443 on extra host must pass"
+        );
+    }
+
+    #[test]
+    fn extra_hosts_rejects_substring_match() {
+        // Exact match only — a substring of an extra host does NOT pass.
+        let extra = vec!["private-mirror.example.com".to_string()];
+        assert!(
+            validate_overpass_url_with_hosts(
+                "https://private-mirror.example.com.evil.example/api/interpreter",
+                &extra
+            )
+            .is_err(),
+            "extra_hosts must require exact host equality (no substring)"
+        );
+        assert!(
+            validate_overpass_url_with_hosts(
+                "https://evil-private-mirror.example.com/api/interpreter",
+                &extra
+            )
+            .is_err(),
+            "extra_hosts must not match on prefix"
+        );
+    }
+
+    #[test]
+    fn extra_hosts_does_not_relax_https() {
+        // ARC-107: HTTPS is enforced unconditionally; an extra host on http
+        // still fails.
+        let extra = vec!["private-mirror.example.com".to_string()];
+        assert!(
+            validate_overpass_url_with_hosts(
+                "http://private-mirror.example.com/api/interpreter",
+                &extra
+            )
+            .is_err(),
+            "extra_hosts must NOT relax the HTTPS requirement"
+        );
+    }
+
+    #[test]
+    fn extra_hosts_does_not_relax_non_443_port() {
+        // ARC-107: port 443 is enforced unconditionally.
+        let extra = vec!["private-mirror.example.com".to_string()];
+        assert!(
+            validate_overpass_url_with_hosts(
+                "https://private-mirror.example.com:8443/api/interpreter",
+                &extra
+            )
+            .is_err(),
+            "extra_hosts must NOT relax the port-443 requirement"
+        );
+    }
+
+    #[test]
+    fn extra_hosts_does_not_relax_userinfo() {
+        // ARC-107: no-userinfo is enforced unconditionally.
+        let extra = vec!["private-mirror.example.com".to_string()];
+        assert!(
+            validate_overpass_url_with_hosts(
+                "https://user:pass@private-mirror.example.com/api/interpreter",
+                &extra
+            )
+            .is_err(),
+            "extra_hosts must NOT relax the no-userinfo requirement"
+        );
+    }
+
+    #[test]
+    fn validate_overpass_url_delegates_with_empty_extra_hosts() {
+        // The no-args wrapper passes an empty slice; behavior matches the
+        // pre-ARC-107 allowlist.
+        assert!(
+            validate_overpass_url("https://overpass-api.de/api/interpreter").is_ok()
+        );
+        assert!(
+            validate_overpass_url("https://private-mirror.example.com/api/interpreter").is_err()
         );
     }
 

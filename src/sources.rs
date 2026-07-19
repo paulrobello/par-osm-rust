@@ -79,6 +79,14 @@ pub struct SourceOptions {
     pub poi_source_mode: PoiSourceMode,
     /// Failure policy for Overture fetch errors.
     pub overture_failure_mode: OvertureFailureMode,
+    /// Consumer-supplied extra Overpass host allowlist (ARC-107, 0.3.0).
+    ///
+    /// Each entry must be an exact DNS-host match (case-sensitive, no scheme,
+    /// no port). The HTTPS, no-userinfo, and port-443 checks stay
+    /// unconditional — adding a host here ONLY relaxes the host allowlist,
+    /// not any other SSRF guard. Adding a host extends the SSRF exposure of
+    /// this process to that host and is the consumer's responsibility.
+    pub extra_allowed_hosts: Vec<String>,
 }
 
 impl Default for SourceOptions {
@@ -90,6 +98,7 @@ impl Default for SourceOptions {
             overture: OvertureParams::default(),
             poi_source_mode: PoiSourceMode::OverturePreferred,
             overture_failure_mode: OvertureFailureMode::FallbackToOsm,
+            extra_allowed_hosts: Vec::new(),
         }
     }
 }
@@ -421,7 +430,7 @@ pub(crate) fn fetch_map_data_with_fetchers<FetchOsm, FetchOverture>(
     mut fetch_overture: FetchOverture,
 ) -> Result<SourceFetchResult>
 where
-    FetchOsm: FnMut(&BBox, &FeatureFilter, bool, &str) -> Result<OsmData>,
+    FetchOsm: FnMut(&BBox, &FeatureFilter, bool, &str, &[String]) -> Result<OsmData>,
     FetchOverture:
         FnMut(&BBox, &OvertureParams, crate::ProgressFn<'_>) -> Result<OsmData>,
 {
@@ -441,6 +450,7 @@ where
         &options.filter,
         options.use_overpass_cache,
         overpass_url,
+        &options.extra_allowed_hosts,
     )?;
 
     let overture_data = if options.overture.enabled {
@@ -620,7 +630,7 @@ mod tests {
             &test_bbox(),
             &options,
             &mut |pct, message| progress.push((pct, message.to_string())),
-            |_, _, _, _| {
+            |_, _, _, _, _| {
                 let mut osm = empty_data();
                 osm.poi_nodes.push(poi(
                     0.5,
@@ -658,7 +668,7 @@ mod tests {
             &test_bbox(),
             &options,
             &mut |_, _| {},
-            |_, _, _, _| {
+            |_, _, _, _, _| {
                 let mut osm = empty_data();
                 osm.poi_nodes.push(poi(
                     0.50000,
@@ -707,7 +717,7 @@ mod tests {
             &test_bbox(),
             &options,
             &mut |_, _| {},
-            |_, _, _, _| {
+            |_, _, _, _, _| {
                 let mut osm = empty_data();
                 osm.poi_nodes.push(poi(
                     0.5,
@@ -745,7 +755,7 @@ mod tests {
             &test_bbox(),
             &options,
             &mut |_, _| {},
-            |_, _, _, _| Ok(empty_data()),
+            |_, _, _, _, _| Ok(empty_data()),
             |_, _, _| anyhow::bail!("strict overture failure"),
         ) {
             Ok(_) => panic!("strict mode should return Overture error"),
@@ -766,7 +776,7 @@ mod tests {
             &test_bbox(),
             &options,
             &mut |pct, _| progress_values.push(pct),
-            |_, _, _, _| Ok(empty_data()),
+            |_, _, _, _, _| Ok(empty_data()),
             |_, _, progress| {
                 progress(0.0, "Overture reset to zero");
                 progress(0.5, "Overture halfway");

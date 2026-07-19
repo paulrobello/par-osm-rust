@@ -89,6 +89,7 @@ fn main() -> anyhow::Result<()> {
         },
         poi_source_mode: PoiSourceMode::OverturePreferred,
         overture_failure_mode: OvertureFailureMode::FallbackToOsm,
+        extra_allowed_hosts: Vec::new(),
     };
     let mut progress = |_: f32, _: &str| {};
     let result = fetch_map_data(&bbox, &options, &mut progress)?;
@@ -112,7 +113,7 @@ use par_osm_rust::{filter::FeatureFilter, overpass};
 fn main() -> anyhow::Result<()> {
     let bbox = BBox::new(38.0, -121.0, 38.01, -120.99)?;
     let url = overpass::default_overpass_url();
-    let data = overpass::fetch_osm_data(&bbox, &FeatureFilter::default(), true, &url)?;
+    let data = overpass::fetch_osm_data(&bbox, &FeatureFilter::default(), true, &url, &[])?;
     println!("ways: {}", data.iter_ways().count());
     Ok(())
 }

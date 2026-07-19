@@ -33,6 +33,7 @@
 //!     },
 //!     poi_source_mode: PoiSourceMode::OverturePreferred,
 //!     overture_failure_mode: OvertureFailureMode::FallbackToOsm,
+//!     extra_allowed_hosts: Vec::new(),
 //! };
 //! let mut progress = |_: f32, _: &str| {};
 //! let result = fetch_map_data(&bbox, &options, &mut progress)?;
