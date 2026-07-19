@@ -254,6 +254,9 @@ fn parse_osm_events<R: std::io::BufRead>(mut reader: Reader<R>) -> Result<OsmDat
     let mut poi_nodes: Vec<OsmPoiNode> = Vec::new();
     let mut addr_nodes: Vec<OsmPoiNode> = Vec::new();
     let mut tree_nodes: Vec<OsmNode> = Vec::new();
+    // ARC-004: lossless superset of every standalone tagged node, so consumers
+    // can classify on keys the curated collections above drop.
+    let mut tagged_nodes: Vec<OsmPoiNode> = Vec::new();
     let mut min_lat = f64::MAX;
     let mut min_lon = f64::MAX;
     let mut max_lat = f64::MIN;
@@ -422,6 +425,17 @@ fn parse_osm_events<R: std::io::BufRead>(mut reader: Reader<R>) -> Result<OsmDat
                         let is_addr = cur_node_tags.contains_key("addr:housenumber");
                         let is_tree =
                             cur_node_tags.get("natural").map(|s| s.as_str()) == Some("tree");
+                        // ARC-004: preserve the full tag map for every
+                        // standalone tagged node, regardless of whether it also
+                        // matches a curated category below.
+                        if !cur_node_tags.is_empty() {
+                            tagged_nodes.push(OsmPoiNode {
+                                lat: cur_lat,
+                                lon: cur_lon,
+                                tags: cur_node_tags.clone(),
+                                source: FeatureSource::Osm,
+                            });
+                        }
                         if is_poi && is_addr {
                             let tags = std::mem::take(&mut cur_node_tags);
                             poi_nodes.push(OsmPoiNode {
@@ -529,13 +543,14 @@ fn parse_osm_events<R: std::io::BufRead>(mut reader: Reader<R>) -> Result<OsmDat
         .or_else(|| (min_lat < f64::MAX).then_some((min_lat, min_lon, max_lat, max_lon)));
 
     log::info!(
-        "Parsed {} nodes, {} ways, {} relations, {} POI nodes, {} address nodes, {} tree nodes (XML)",
+        "Parsed {} nodes, {} ways, {} relations, {} POI nodes, {} address nodes, {} tree nodes, {} tagged nodes (XML)",
         nodes.len(),
         ways.len(),
         relations.len(),
         poi_nodes.len(),
         addr_nodes.len(),
         tree_nodes.len(),
+        tagged_nodes.len(),
     );
 
     Ok(OsmData::default()
@@ -545,7 +560,8 @@ fn parse_osm_events<R: std::io::BufRead>(mut reader: Reader<R>) -> Result<OsmDat
         .with_bounds(bounds)
         .with_poi_nodes(poi_nodes)
         .with_addr_nodes(addr_nodes)
-        .with_tree_nodes(tree_nodes))
+        .with_tree_nodes(tree_nodes)
+        .with_tagged_nodes(tagged_nodes))
 }
 
 /// Parse a `.osm` XML file into `OsmData`.

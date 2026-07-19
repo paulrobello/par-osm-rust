@@ -232,6 +232,82 @@ fn parse_then_write_then_parse_preserves_full_osm_data() {
 }
 
 #[test]
+fn tagged_nodes_preserves_nodes_the_curated_collections_drop() {
+    // ARC-004: three standalone tagged nodes. A mountain peak (`natural=peak`)
+    // and a man-made tower (`man_made=tower`) use keys the crate's curated
+    // POI/address/tree collections deliberately ignore; a conventional POI
+    // (`amenity=cafe`) is in a curated collection and serves as a regression
+    // guard. `tagged_nodes` must retain all three with full tag maps; the
+    // curated `poi_nodes` must retain only the cafe.
+    const FIXTURE: &str = r#"<?xml version="1.0"?>
+<osm version="0.6">
+  <bounds minlat="51.5" minlon="-0.10" maxlat="51.51" maxlon="-0.09"/>
+  <node id="1" lat="51.5" lon="-0.10"/>
+  <node id="100" lat="51.505" lon="-0.095">
+    <tag k="natural" v="peak"/>
+    <tag k="name" v="Test Hill"/>
+    <tag k="ele" v="123"/>
+  </node>
+  <node id="101" lat="51.506" lon="-0.096">
+    <tag k="man_made" v="tower"/>
+  </node>
+  <node id="102" lat="51.507" lon="-0.094">
+    <tag k="amenity" v="cafe"/>
+    <tag k="name" v="Cafe"/>
+  </node>
+</osm>"#;
+
+    let data = parse_osm_xml_str(FIXTURE).expect("parse");
+
+    // The curated POI collection keeps only the cafe; peak and tower are not
+    // POI_TAG_KEYS, so without tagged_nodes they would be silently lost.
+    assert_eq!(data.poi_nodes().len(), 1);
+    assert_eq!(
+        data.poi_nodes()[0].tags.get("amenity").map(String::as_str),
+        Some("cafe")
+    );
+
+    // tagged_nodes is the lossless superset: all three tagged nodes.
+    assert_eq!(data.tagged_nodes().len(), 3);
+    let has = |key: &str, value: &str| {
+        data.tagged_nodes()
+            .iter()
+            .any(|n| n.tags.get(key).map(String::as_str) == Some(value))
+    };
+    assert!(has("natural", "peak"));
+    assert!(has("man_made", "tower"));
+    assert!(has("amenity", "cafe"));
+
+    // The peak's non-classifying tags (`name`, `ele`) survive intact.
+    let peak = data
+        .tagged_nodes()
+        .iter()
+        .find(|n| n.tags.get("natural").map(String::as_str) == Some("peak"))
+        .expect("peak in tagged_nodes");
+    assert_eq!(peak.tags.get("name").map(String::as_str), Some("Test Hill"));
+    assert_eq!(peak.tags.get("ele").map(String::as_str), Some("123"));
+
+    // Round-trip through the writer must preserve peak/tower. Pre-0.3.1 the
+    // writer dropped them because they were never in a curated collection.
+    let rewritten = parse_osm_xml_str(&write_osm_xml_string(&data)).expect("re-parse");
+    assert_eq!(rewritten.tagged_nodes().len(), 3);
+    assert!(
+        rewritten
+            .tagged_nodes()
+            .iter()
+            .any(|n| n.tags.get("natural").map(String::as_str) == Some("peak"))
+    );
+    assert!(
+        rewritten
+            .tagged_nodes()
+            .iter()
+            .any(|n| n.tags.get("man_made").map(String::as_str) == Some("tower"))
+    );
+    // The curated POI is re-derived on re-parse.
+    assert_eq!(rewritten.poi_nodes().len(), 1);
+}
+
+#[test]
 fn merge_source_data_dedupes_duplicate_pois_preferring_overture() {
     // Two POIs at the same place (within the 25 m duplicate threshold) with
     // matching category + name. Overture must win under OverturePreferred.

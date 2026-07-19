@@ -9,6 +9,34 @@ Released versions are published to [crates.io](https://crates.io/crates/par-osm-
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-07-19
+
+### Added
+
+- **`OsmData::tagged_nodes` — lossless collection of every standalone tagged
+  node (ARC-004).** The XML and PBF parsers now populate
+  `tagged_nodes: Vec<OsmPoiNode>` with every standalone node carrying one or
+  more tags, each retaining its full tag map. It is the lossless superset of
+  the curated `poi_nodes` / `addr_nodes` / `tree_nodes` collections, which only
+  classify `amenity`/`shop`/`tourism`/`leisure`/`historic`, `addr:housenumber`,
+  and `natural=tree`. Consumers that classify on other tag keys (e.g.
+  `natural=peak`, `man_made=*`) should read `OsmData::tagged_nodes()` — the
+  curated collections silently drop such nodes. Read via the `tagged_nodes()`
+  accessor, set via the `with_tagged_nodes` builder, and carried through
+  `merge` and `clip_to_bbox`.
+
+- **`write_osm_xml_string` round-trips every tagged node when `tagged_nodes`
+  is populated.** A write → re-read cycle no longer discards nodes outside the
+  curated classifications (`natural=peak`, `man_made=tower`, …) — previously
+  those tags were silently lost on round-trip. When `tagged_nodes` is empty
+  (an `OsmData` built directly via `with_poi_nodes` / `with_addr_nodes` /
+  `with_tree_nodes` and never parsed), the writer keeps the pre-0.3.1 curated
+  emission byte-for-byte, so that path is unchanged.
+
+This release is additive only. Consumers on 0.3.0 can bump with no code
+changes: `tagged_nodes` defaults to empty and the writer fallback preserves the
+legacy builder-only behavior.
+
 ## [0.3.0] - 2026-07-18
 
 The 0.3.0 release consolidates six interrelated breaking changes from the
@@ -367,7 +395,8 @@ OSM XML/PBF parsing, normalized `OsmData` interchange, SRTM tile download, HGT
 elevation sampling, atomic write-then-rename cache discipline, and the
 `sources::fetch_map_data` orchestration entry point.
 
-[Unreleased]: https://github.com/paulrobello/par-osm-rust/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/paulrobello/par-osm-rust/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/paulrobello/par-osm-rust/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/paulrobello/par-osm-rust/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/paulrobello/par-osm-rust/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/paulrobello/par-osm-rust/compare/v0.1.1...v0.2.0

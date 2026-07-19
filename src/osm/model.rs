@@ -151,6 +151,12 @@ pub struct OsmData {
     pub(crate) addr_nodes: Vec<OsmPoiNode>,
     /// Individual tree positions (from OSM `natural=tree` or Overture `land/tree`).
     pub(crate) tree_nodes: Vec<OsmNode>,
+    /// Every standalone node carrying one or more tags — the lossless superset
+    /// of `poi_nodes` / `addr_nodes` / `tree_nodes`. Populated by the parsers so
+    /// a consumer can run its own classification over tag keys the curated
+    /// collections deliberately exclude (e.g. `natural=peak`, `man_made=tower`).
+    /// Each entry retains the node's full tag map.
+    pub(crate) tagged_nodes: Vec<OsmPoiNode>,
 }
 
 impl Default for OsmData {
@@ -170,6 +176,7 @@ impl Default for OsmData {
             poi_nodes: Vec::new(),
             addr_nodes: Vec::new(),
             tree_nodes: Vec::new(),
+            tagged_nodes: Vec::new(),
         }
     }
 }
@@ -233,6 +240,7 @@ impl OsmData {
             poi_nodes,
             addr_nodes,
             tree_nodes,
+            tagged_nodes: Vec::new(),
         };
         debug_assert!(
             data.validate_invariants().is_ok(),
@@ -335,6 +343,19 @@ impl OsmData {
         self
     }
 
+    /// Replace the lossless standalone-tagged-nodes slice (the superset of POI,
+    /// address, and tree nodes). Normally populated by the parsers; exposed on
+    /// the builder for symmetry and for consumers that construct an
+    /// [`OsmData`] directly and want the writer to emit every tagged node.
+    pub fn with_tagged_nodes(mut self, tagged_nodes: Vec<OsmPoiNode>) -> Self {
+        self.tagged_nodes = tagged_nodes;
+        debug_assert!(
+            self.validate_invariants().is_ok(),
+            "OsmData::with_tagged_nodes produced an inconsistent state"
+        );
+        self
+    }
+
     /// Append a way, updating `ways_by_id` atomically from [`OsmWay::id`].
     ///
     /// This is the single sanctioned mutation path for incrementally adding
@@ -421,6 +442,18 @@ impl OsmData {
         &self.tree_nodes
     }
 
+    /// Borrow the lossless slice of every standalone tagged node.
+    ///
+    /// This is the superset of [`OsmData::poi_nodes`], [`OsmData::addr_nodes`],
+    /// and [`OsmData::tree_nodes`]: every standalone node that carried one or
+    /// more tags at parse time, with its full tag map preserved. Consumers that
+    /// classify on tag keys outside the crate's curated POI set (e.g.
+    /// `natural=peak`, `man_made=*`) should iterate this slice rather than the
+    /// curated ones, which silently drop such nodes.
+    pub fn tagged_nodes(&self) -> &[OsmPoiNode] {
+        &self.tagged_nodes
+    }
+
     /// Verify the `ways` / `ways_by_id` invariant: equal lengths, every
     /// stored index is in range, no two ids share an index, and each
     /// `ways_by_id[ways[idx].id] == idx` (the per-way consistency check
@@ -492,8 +525,8 @@ impl OsmData {
     ///   Indices for appended ways are shifted by `self.ways.len()` so each
     ///   `(id → index)` entry points at the right slot.
     /// * `relations` — `other`'s relations are appended; no de-duplication.
-    /// * `poi_nodes`, `addr_nodes`, `tree_nodes` — `other`'s entries are
-    ///   appended in order; no de-duplication.
+    /// * `poi_nodes`, `addr_nodes`, `tree_nodes`, `tagged_nodes` — `other`'s
+    ///   entries are appended in order; no de-duplication.
     /// * `bounds` — when both sides have a bbox, the per-axis union is stored
     ///   `(min(south), min(west), max(north), max(east))`. When only
     ///   one side has a bbox, that bbox is kept. When neither side has one,
@@ -518,6 +551,7 @@ impl OsmData {
         self.poi_nodes.extend(other.poi_nodes);
         self.addr_nodes.extend(other.addr_nodes);
         self.tree_nodes.extend(other.tree_nodes);
+        self.tagged_nodes.extend(other.tagged_nodes);
         match (self.bounds, other.bounds) {
             (Some((a0, a1, a2, a3)), Some((b0, b1, b2, b3))) => {
                 self.bounds = Some((a0.min(b0), a1.min(b1), a2.max(b2), a3.max(b3)));
@@ -578,10 +612,11 @@ impl OsmData {
         // Prune nodes to only those referenced by kept ways
         self.nodes.retain(|id, _| keep_node_ids.contains(id));
 
-        // Filter POI and address nodes
+        // Filter POI, address, tree, and lossless tagged nodes
         self.poi_nodes.retain(|p| in_bbox(p.lat, p.lon));
         self.addr_nodes.retain(|p| in_bbox(p.lat, p.lon));
         self.tree_nodes.retain(|n| in_bbox(n.lat, n.lon));
+        self.tagged_nodes.retain(|n| in_bbox(n.lat, n.lon));
 
         // Filter relations: keep if any member way was kept
         self.relations.retain(|rel| {

@@ -36,6 +36,7 @@ fn process_pbf_node(
     poi_nodes: &mut Vec<OsmPoiNode>,
     addr_nodes: &mut Vec<OsmPoiNode>,
     tree_nodes: &mut Vec<OsmNode>,
+    tagged_nodes: &mut Vec<OsmPoiNode>,
     min_lat: &mut f64,
     min_lon: &mut f64,
     max_lat: &mut f64,
@@ -46,6 +47,15 @@ fn process_pbf_node(
     *max_lat = max_lat.max(lat);
     *max_lon = max_lon.max(lon);
     nodes.insert(id, OsmNode { lat, lon });
+    // ARC-004: preserve the full tag map for every standalone tagged node.
+    if !tags.is_empty() {
+        tagged_nodes.push(OsmPoiNode {
+            lat,
+            lon,
+            tags: tags.clone(),
+            source: FeatureSource::Osm,
+        });
+    }
     if tags.keys().any(|k| POI_TAG_KEYS.contains(&k.as_str())) {
         poi_nodes.push(OsmPoiNode {
             lat,
@@ -114,6 +124,7 @@ pub fn parse_pbf(path: &Path) -> Result<OsmData> {
     let mut poi_nodes: Vec<OsmPoiNode> = Vec::new();
     let mut addr_nodes: Vec<OsmPoiNode> = Vec::new();
     let mut tree_nodes: Vec<OsmNode> = Vec::new();
+    let mut tagged_nodes: Vec<OsmPoiNode> = Vec::new();
     let mut min_lat = f64::MAX;
     let mut min_lon = f64::MAX;
     let mut max_lat = f64::MIN;
@@ -139,6 +150,7 @@ pub fn parse_pbf(path: &Path) -> Result<OsmData> {
                     &mut poi_nodes,
                     &mut addr_nodes,
                     &mut tree_nodes,
+                    &mut tagged_nodes,
                     &mut min_lat,
                     &mut min_lon,
                     &mut max_lat,
@@ -159,6 +171,7 @@ pub fn parse_pbf(path: &Path) -> Result<OsmData> {
                     &mut poi_nodes,
                     &mut addr_nodes,
                     &mut tree_nodes,
+                    &mut tagged_nodes,
                     &mut min_lat,
                     &mut min_lon,
                     &mut max_lat,
@@ -242,13 +255,14 @@ pub fn parse_pbf(path: &Path) -> Result<OsmData> {
     };
 
     log::info!(
-        "Parsed {} nodes, {} ways, {} relations, {} POI nodes, {} address nodes, {} tree nodes",
+        "Parsed {} nodes, {} ways, {} relations, {} POI nodes, {} address nodes, {} tree nodes, {} tagged nodes",
         nodes.len(),
         ways.len(),
         relations.len(),
         poi_nodes.len(),
         addr_nodes.len(),
-        tree_nodes.len()
+        tree_nodes.len(),
+        tagged_nodes.len()
     );
 
     Ok(OsmData::default()
@@ -258,5 +272,6 @@ pub fn parse_pbf(path: &Path) -> Result<OsmData> {
         .with_bounds(bounds)
         .with_poi_nodes(poi_nodes)
         .with_addr_nodes(addr_nodes)
-        .with_tree_nodes(tree_nodes))
+        .with_tree_nodes(tree_nodes)
+        .with_tagged_nodes(tagged_nodes))
 }

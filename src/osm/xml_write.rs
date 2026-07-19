@@ -88,32 +88,53 @@ pub fn write_osm_xml_string(data: &OsmData) -> String {
 
     let mut occupied_node_ids: HashSet<i64> = data.nodes.keys().copied().collect();
     let mut synthetic_id = SYNTHETIC_NODE_ID_BASE;
-    for poi in &data.poi_nodes {
-        let node_id = next_writer_node_id(&mut synthetic_id, &mut occupied_node_ids);
-        xml.push_str(&format!(
-            "  <node id=\"{}\" lat=\"{}\" lon=\"{}\">\n",
-            node_id, poi.lat, poi.lon
-        ));
-        write_tags(&mut xml, &poi.tags);
-        xml.push_str("  </node>\n");
-    }
+    // ARC-004: when the parser populated the lossless `tagged_nodes` slice,
+    // emit every standalone tagged node from it (one <node> per entry, full
+    // tag map). This preserves nodes the curated poi/addr/tree collections
+    // drop on parse — e.g. `natural=peak`, `man_made=tower` — so a
+    // write -> re-read round-trip through this writer no longer silently
+    // loses them. When `tagged_nodes` is empty (an `OsmData` built directly
+    // via the `with_poi_nodes` / `with_addr_nodes` / `with_tree_nodes`
+    // builders and never parsed), fall back to emitting the curated
+    // collections so that path stays byte-identical to pre-0.3.1.
+    if !data.tagged_nodes.is_empty() {
+        for tagged in &data.tagged_nodes {
+            let node_id = next_writer_node_id(&mut synthetic_id, &mut occupied_node_ids);
+            xml.push_str(&format!(
+                "  <node id=\"{}\" lat=\"{}\" lon=\"{}\">\n",
+                node_id, tagged.lat, tagged.lon
+            ));
+            write_tags(&mut xml, &tagged.tags);
+            xml.push_str("  </node>\n");
+        }
+    } else {
+        for poi in &data.poi_nodes {
+            let node_id = next_writer_node_id(&mut synthetic_id, &mut occupied_node_ids);
+            xml.push_str(&format!(
+                "  <node id=\"{}\" lat=\"{}\" lon=\"{}\">\n",
+                node_id, poi.lat, poi.lon
+            ));
+            write_tags(&mut xml, &poi.tags);
+            xml.push_str("  </node>\n");
+        }
 
-    for addr in &data.addr_nodes {
-        let node_id = next_writer_node_id(&mut synthetic_id, &mut occupied_node_ids);
-        xml.push_str(&format!(
-            "  <node id=\"{}\" lat=\"{}\" lon=\"{}\">\n",
-            node_id, addr.lat, addr.lon
-        ));
-        write_tags(&mut xml, &addr.tags);
-        xml.push_str("  </node>\n");
-    }
+        for addr in &data.addr_nodes {
+            let node_id = next_writer_node_id(&mut synthetic_id, &mut occupied_node_ids);
+            xml.push_str(&format!(
+                "  <node id=\"{}\" lat=\"{}\" lon=\"{}\">\n",
+                node_id, addr.lat, addr.lon
+            ));
+            write_tags(&mut xml, &addr.tags);
+            xml.push_str("  </node>\n");
+        }
 
-    for tree in &data.tree_nodes {
-        let node_id = next_writer_node_id(&mut synthetic_id, &mut occupied_node_ids);
-        xml.push_str(&format!(
-            "  <node id=\"{}\" lat=\"{}\" lon=\"{}\">\n    <tag k=\"natural\" v=\"tree\"/>\n  </node>\n",
-            node_id, tree.lat, tree.lon
-        ));
+        for tree in &data.tree_nodes {
+            let node_id = next_writer_node_id(&mut synthetic_id, &mut occupied_node_ids);
+            xml.push_str(&format!(
+                "  <node id=\"{}\" lat=\"{}\" lon=\"{}\">\n    <tag k=\"natural\" v=\"tree\"/>\n  </node>\n",
+                node_id, tree.lat, tree.lon
+            ));
+        }
     }
 
     // QA-021 / ARC-003 / QA-001: each `OsmWay` carries its own id, so the
