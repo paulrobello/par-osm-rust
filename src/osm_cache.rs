@@ -186,6 +186,11 @@ fn canonical_overpass_url(overpass_url: &str) -> String {
 
 /// Return cached XML for `key`, or `None` if not present or unreadable.
 ///
+/// `key` must match the cache's `[0-9a-zA-Z_-]` alphabet (SEC-105) — the
+/// crate's [`cache_key`] / [`cache_key_for_url`] produce SHA-256 hex digests
+/// that satisfy this; a downstream app forwarding an untrusted string gets a
+/// `None` (treated as a miss) for keys outside the alphabet.
+///
 /// **Deprecated** (ARC-011 / QA-011): this is the legacy bbox+filter read and
 /// does not check the entry's Overpass endpoint. Prefer [`read_for_url`],
 /// which gates the read on the entry's stored `overpass_url` so an entry
@@ -199,11 +204,19 @@ pub fn read(key: &str) -> Option<String> {
 }
 
 /// Return cached XML for `key` only when its metadata matches `overpass_url`.
+///
+/// `key` must match the cache's `[0-9a-zA-Z_-]` alphabet (SEC-105); an
+/// invalid key yields `None`.
 pub fn read_for_url(key: &str, overpass_url: &str) -> Option<String> {
     read_from_for_url(&cache_dir(), key, overpass_url)
 }
 
 /// Atomically write `xml` + metadata for `key`.
+///
+/// `key` must match the cache's `[0-9a-zA-Z_-]` alphabet (SEC-105) — the
+/// crate's [`cache_key`] / [`cache_key_for_url`] produce SHA-256 hex digests
+/// that satisfy this; an out-of-alphabet key returns `Err` rather than
+/// writing outside the cache directory.
 ///
 /// **Deprecated** (ARC-011 / QA-011): this is the legacy bbox+filter write
 /// and records no Overpass endpoint in the metadata. Prefer [`write_for_url`],
@@ -223,6 +236,9 @@ pub fn write(
 }
 
 /// Atomically write `xml` + URL-aware metadata for `key`.
+///
+/// `key` must match the cache's `[0-9a-zA-Z_-]` alphabet (SEC-105); an
+/// out-of-alphabet key returns `Err`.
 pub fn write_for_url(
     key: &str,
     bbox: (f64, f64, f64, f64),

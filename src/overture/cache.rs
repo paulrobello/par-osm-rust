@@ -211,6 +211,11 @@ pub fn overture_cache_key_with_version(
 /// is read for the `created_at` timestamp; an entry whose age exceeds `ttl`,
 /// a missing/unreadable/expired meta file, or a missing geojson file all
 /// yield `None` (treated as a miss → caller re-fetches).
+///
+/// `key` must match the cache's `[0-9a-zA-Z_-]` alphabet (SEC-105); the
+/// crate's [`overture_cache_key`] / [`overture_cache_key_with_version`]
+/// produce SHA-256 hex digests that satisfy this. An out-of-alphabet key
+/// yields `None` (no path is built, no file touched).
 pub fn overture_cache_read(dir: &Path, key: &str, ttl: Option<Duration>) -> Option<String> {
     let cache = raw_cache(dir);
     if let Some(ttl) = ttl {
@@ -250,6 +255,11 @@ pub fn overture_cache_read(dir: &Path, key: &str, ttl: Option<Duration>) -> Opti
 /// Atomically write `geojson` + metadata for `key` (ARC-001: stores
 /// `cli_version` in the meta sidecar so TTL lookups can be paired with the
 /// version that wrote the entry).
+///
+/// `key` must match the cache's `[0-9a-zA-Z_-]` alphabet (SEC-105); the
+/// crate's [`overture_cache_key`] / [`overture_cache_key_with_version`]
+/// produce SHA-256 hex digests that satisfy this. An out-of-alphabet key
+/// returns `Err` without touching the filesystem.
 ///
 /// Delegates to [`RawCache::write`], which owns the QA-012 atomic protocol
 /// (meta sidecar finalized first, data renamed last). The committed/visible

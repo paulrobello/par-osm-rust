@@ -64,6 +64,7 @@
 // `cargo clippy -- -D warnings`, so the gate stays green by construction.
 #![warn(missing_docs)]
 
+pub(crate) mod bbox;
 pub mod cache;
 pub mod cache_store;
 pub mod elevation;

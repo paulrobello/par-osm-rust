@@ -108,14 +108,18 @@ pub fn default_overpass_url() -> Cow<'static, str> {
 /// including only the feature types enabled in `filter`.
 ///
 /// `bbox` is `(south, west, north, east)` in decimal degrees.
+///
+/// # Errors
+///
+/// Returns `Err` if the bbox fails [`crate::bbox::validate_bbox`] (SEC-104):
+/// non-finite coordinate, latitude outside `[-90, 90]`, longitude outside
+/// `[-180, 180]`, or `south >= north` / `west >= east`. All NaN comparisons
+/// are false, so the explicit `is_finite()` check inside the validator is
+/// what catches NaN (the previous `south >= north` guard could not).
+/// Returns `Err` if every feature type is disabled (nothing to query).
 pub fn build_overpass_query(bbox: (f64, f64, f64, f64), filter: &FeatureFilter) -> Result<String> {
     let (south, west, north, east) = bbox;
-    if south >= north {
-        bail!("invalid bbox: south ({south}) must be less than north ({north})");
-    }
-    if west >= east {
-        bail!("invalid bbox: west ({west}) must be less than east ({east})");
-    }
+    crate::bbox::validate_bbox(south, west, north, east)?;
 
     let b = format!("{south},{west},{north},{east}");
     let mut parts: Vec<String> = Vec::new();
@@ -417,6 +421,35 @@ mod tests {
         let filter = FeatureFilter::default();
         let result = build_overpass_query((51.5, -0.10, 51.52, -0.13), &filter);
         assert!(result.is_err(), "should fail when west >= east");
+    }
+
+    // ── SEC-104: NaN / inf / out-of-range bypass ───────────────────────────
+
+    #[test]
+    fn invalid_bbox_nan_in_any_position() {
+        let filter = FeatureFilter::default();
+        // All NaN comparisons are false, so the previous `south >= north`
+        // check could not catch NaN; the shared validator's is_finite() does.
+        assert!(build_overpass_query((f64::NAN, -0.13, 51.52, -0.10), &filter).is_err());
+        assert!(build_overpass_query((51.5, f64::NAN, 51.52, -0.10), &filter).is_err());
+        assert!(build_overpass_query((51.5, -0.13, f64::NAN, -0.10), &filter).is_err());
+        assert!(build_overpass_query((51.5, -0.13, 51.52, f64::NAN), &filter).is_err());
+    }
+
+    #[test]
+    fn invalid_bbox_infinity_rejected() {
+        let filter = FeatureFilter::default();
+        assert!(build_overpass_query((f64::INFINITY, -0.13, 51.52, -0.10), &filter).is_err());
+        assert!(build_overpass_query((51.5, -0.13, 51.52, f64::NEG_INFINITY), &filter).is_err());
+    }
+
+    #[test]
+    fn invalid_bbox_out_of_range_lat_lon_rejected() {
+        let filter = FeatureFilter::default();
+        // lat 95 is well-ordered but out of range — previously accepted.
+        assert!(build_overpass_query((95.0, -0.13, 96.0, -0.10), &filter).is_err());
+        // lon 200 likewise.
+        assert!(build_overpass_query((51.5, 199.0, 51.52, 200.0), &filter).is_err());
     }
 
     #[test]
