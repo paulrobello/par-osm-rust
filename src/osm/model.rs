@@ -11,6 +11,20 @@
 
 use std::collections::{HashMap, HashSet};
 
+/// Tag keys whose presence on a standalone OSM node classifies it as a POI.
+///
+/// This is the **single source of truth** for runtime POI classification
+/// (ARC-105): the XML parser ([`super::xml_parse`]) and the PBF parser
+/// ([`super::pbf`]) both iterate this constant when deciding whether a node
+/// belongs in [`OsmData::poi_nodes`]. The dedupe helper
+/// `crate::sources::poi_category` extends this list with `man_made` as a
+/// dedupe-only extra category (two `man_made` POIs must not dedupe against
+/// each other across categories); runtime classification stays at these
+/// five keys so `man_made`/`natural` nodes intentionally over-fetched by
+/// `crate::overpass::build_overpass_query` are NOT silently promoted to
+/// POIs — see the ARC-105 comment in that function.
+pub(crate) const POI_TAG_KEYS: &[&str] = &["amenity", "shop", "tourism", "leisure", "historic"];
+
 /// A geographic point from the OSM dataset.
 #[derive(Debug, Clone, Copy)]
 pub struct OsmNode {
@@ -89,10 +103,19 @@ pub struct OsmRelation {
 
 /// Parsed OSM dataset.
 ///
-/// Every collection is `pub(crate)` so external consumers must go through the
-/// accessors below. The `ways` / `ways_by_id` pair in particular must stay
-/// in lock-step: each entry in `ways` has exactly one corresponding entry in
-/// `ways_by_id` mapping its OSM id to its index. The pair is mutated only by
+/// **Field encapsulation is partial (ARC-109 interim).** The `nodes`,
+/// `ways`, and `ways_by_id` fields are `pub(crate)` and must be reached
+/// through the accessors below ([`OsmData::nodes`], [`OsmData::ways`],
+/// [`OsmData::ways_by_id`], [`OsmData::iter_ways`], [`OsmData::way_id_at`]).
+/// The remaining collections (`relations`, `bounds`, `poi_nodes`,
+/// `addr_nodes`, `tree_nodes`) are still `pub` for direct field access by
+/// downstream consumers; a planned 0.3.0 release will move them behind
+/// read accessors and a builder so the encapsulation is consistent across
+/// the struct.
+///
+/// The `ways` / `ways_by_id` pair in particular must stay in lock-step: each
+/// entry in `ways` has exactly one corresponding entry in `ways_by_id`
+/// mapping its OSM id to its index. The pair is mutated only by
 /// [`OsmData::new`] and [`OsmData::push_way`]; in-place bulk operations
 /// (`merge`, `clip_to_bbox`) preserve the invariant internally and are
 /// checked by [`OsmData::validate_invariants`] in debug builds.

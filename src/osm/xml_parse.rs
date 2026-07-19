@@ -20,7 +20,7 @@ use quick_xml::events::Event;
 use quick_xml::events::attributes::Attribute;
 
 use super::model::{
-    FeatureSource, OsmData, OsmNode, OsmPoiNode, OsmRelation, OsmWay, RelationMember,
+    FeatureSource, OsmData, OsmNode, OsmPoiNode, OsmRelation, OsmWay, POI_TAG_KEYS, RelationMember,
 };
 use super::pbf::parse_pbf;
 
@@ -369,12 +369,10 @@ fn parse_osm_events<R: std::io::BufRead>(mut reader: Reader<R>) -> Result<OsmDat
                 match e.name().as_ref() {
                     b"node" if in_node => {
                         in_node = false;
-                        if cur_node_tags.keys().any(|k| {
-                            matches!(
-                                k.as_str(),
-                                "amenity" | "shop" | "tourism" | "leisure" | "historic"
-                            )
-                        }) {
+                        if cur_node_tags
+                            .keys()
+                            .any(|k| POI_TAG_KEYS.contains(&k.as_str()))
+                        {
                             poi_nodes.push(OsmPoiNode {
                                 lat: cur_lat,
                                 lon: cur_lon,

@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use osmpbf::{Element, ElementReader};
 
 use super::model::{
-    FeatureSource, OsmData, OsmNode, OsmPoiNode, OsmRelation, OsmWay, RelationMember,
+    FeatureSource, OsmData, OsmNode, OsmPoiNode, OsmRelation, OsmWay, POI_TAG_KEYS, RelationMember,
 };
 
 /// Shared body of the `Element::Node` and `Element::DenseNode` branches in
@@ -46,12 +46,7 @@ fn process_pbf_node(
     *max_lat = max_lat.max(lat);
     *max_lon = max_lon.max(lon);
     nodes.insert(id, OsmNode { lat, lon });
-    if tags.keys().any(|k| {
-        matches!(
-            k.as_str(),
-            "amenity" | "shop" | "tourism" | "leisure" | "historic"
-        )
-    }) {
+    if tags.keys().any(|k| POI_TAG_KEYS.contains(&k.as_str())) {
         poi_nodes.push(OsmPoiNode {
             lat,
             lon,

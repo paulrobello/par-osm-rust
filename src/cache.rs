@@ -151,18 +151,42 @@ fn env_dir(name: &str) -> Option<PathBuf> {
 }
 
 fn platform_cache_root(app_name: &str) -> PathBuf {
-    // On Windows the conventional per-user application-data location is
-    // `LOCALAPPDATA`; native Windows installs should land there rather than
-    // under `HOME` (which is typically only set via MSYS/Cygwin/Git-Bash
-    // shells). Prefer `LOCALAPPDATA` when present, fall back to `HOME` for
-    // POSIX systems, and finally to the system temp dir. See QA-020.
-    if let Some(local) = env_dir("LOCALAPPDATA") {
-        local.join(app_name)
-    } else if let Some(home) = env_dir("HOME") {
-        home.join(".cache").join(app_name)
+    // ARC-110: platform-correct cache root resolution.
+    //
+    // Windows: `LOCALAPPDATA` is the conventional per-user application-data
+    // location; native Windows installs should land there rather than under
+    // `HOME` (which is typically only set via MSYS/Cygwin/Git-Bash shells).
+    // Fall back to `HOME/.cache/<app>` if `LOCALAPPDATA` is unset, then to
+    // the system temp dir. See QA-020.
+    //
+    // Unix (incl. macOS): honor `XDG_CACHE_HOME` when set and non-empty
+    // (`env_dir` filters empties), then fall back to the conventional
+    // `$HOME/.cache/<app>`. macOS deliberately stays on `~/.cache/<app>`
+    // rather than `~/Library/Caches/<app>` so existing user caches are not
+    // orphaned — switching to the macOS-conventional location would
+    // silently hide every entry written by 0.1.x/0.2.x until each user
+    // either re-runs `migrate_legacy_caches` or re-fetches. Migration to
+    // `~/Library/Caches` is out of scope for this cycle.
+    //
+    // `cfg!(windows)` is a compile-time gate, so a unix shell that happens
+    // to export `LOCALAPPDATA` (a misconfiguration) cannot override the
+    // XDG/HOME-based path — verified by `roots_ignore_localappdata_on_unix`.
+    if cfg!(windows) {
+        if let Some(local) = env_dir("LOCALAPPDATA") {
+            return local.join(app_name);
+        }
+        if let Some(home) = env_dir("HOME") {
+            return home.join(".cache").join(app_name);
+        }
     } else {
-        std::env::temp_dir().join(app_name)
+        if let Some(xdg) = env_dir("XDG_CACHE_HOME") {
+            return xdg.join(app_name);
+        }
+        if let Some(home) = env_dir("HOME") {
+            return home.join(".cache").join(app_name);
+        }
     }
+    std::env::temp_dir().join(app_name)
 }
 
 fn ensure_dir(dir: &Path, label: &str) {
@@ -369,6 +393,7 @@ mod tests {
     const ENV_KEYS: &[&str] = &[
         "HOME",
         "LOCALAPPDATA",
+        "XDG_CACHE_HOME",
         "PAR_OSM_OVERPASS_CACHE_DIR",
         "OVERPASS_CACHE_DIR",
         "PAR_OSM_SRTM_CACHE_DIR",
@@ -459,6 +484,7 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
     #[test]
     fn roots_use_localappdata_when_home_is_unset() {
         let _guard = env_lock().lock().unwrap();
@@ -471,6 +497,7 @@ mod tests {
         assert_eq!(legacy_cache_root(), tmp.path().join("osm-to-bedrock"));
     }
 
+    #[cfg(windows)]
     #[test]
     fn roots_prefer_localappdata_when_both_set() {
         // QA-020: on Windows both LOCALAPPDATA and HOME are typically set; the
@@ -490,6 +517,77 @@ mod tests {
 
         assert_eq!(shared_cache_root(), local.join("par-osm-rust"));
         assert_eq!(legacy_cache_root(), local.join("osm-to-bedrock"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn roots_use_xdg_cache_home_when_set() {
+        // ARC-110: on unix, XDG_CACHE_HOME takes precedence over $HOME/.cache
+        // when set and non-empty (env_dir filters empties).
+        let _guard = env_lock().lock().unwrap();
+        let env = EnvSnapshot::capture();
+        isolate_cache_env(&env);
+        let tmp = TempDir::new().unwrap();
+        let xdg = tmp.path().join("xdg-cache");
+        let home = tmp.path().join("home");
+        fs::create_dir_all(&xdg).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        env.set_path("XDG_CACHE_HOME", &xdg);
+        env.set_path("HOME", &home);
+
+        assert_eq!(shared_cache_root(), xdg.join("par-osm-rust"));
+        assert_eq!(legacy_cache_root(), xdg.join("osm-to-bedrock"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn roots_ignore_localappdata_on_unix() {
+        // ARC-110: LOCALAPPDATA is a Windows-only env var; a misconfigured
+        // unix shell that exports it must not override the XDG/HOME-based
+        // path. `cfg!(windows)` is the compile-time gate that enforces this.
+        let _guard = env_lock().lock().unwrap();
+        let env = EnvSnapshot::capture();
+        isolate_cache_env(&env);
+        let tmp = TempDir::new().unwrap();
+        let local = tmp.path().join("localappdata");
+        let home = tmp.path().join("home");
+        fs::create_dir_all(&local).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        env.set_path("LOCALAPPDATA", &local);
+        env.set_path("HOME", &home);
+
+        assert_eq!(
+            shared_cache_root(),
+            home.join(".cache").join("par-osm-rust")
+        );
+        assert_eq!(
+            legacy_cache_root(),
+            home.join(".cache").join("osm-to-bedrock")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn roots_empty_xdg_cache_home_falls_back_to_home() {
+        // ARC-110: an empty XDG_CACHE_HOME value is filtered out by env_dir,
+        // so resolution falls through to $HOME/.cache/<app> as if XDG were
+        // unset (matches the XDG spec — an empty value is "unset").
+        let _guard = env_lock().lock().unwrap();
+        let env = EnvSnapshot::capture();
+        isolate_cache_env(&env);
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        env.set_path("HOME", &home);
+        // SAFETY: env-mutation serialized by env_lock(); restored on drop.
+        unsafe {
+            std::env::set_var("XDG_CACHE_HOME", "");
+        }
+
+        assert_eq!(
+            shared_cache_root(),
+            home.join(".cache").join("par-osm-rust")
+        );
     }
 
     #[test]

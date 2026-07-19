@@ -39,6 +39,8 @@ pub use pbf::parse_pbf;
 pub use xml_parse::{parse_osm_file, parse_osm_xml, parse_osm_xml_file, parse_osm_xml_str};
 pub use xml_write::write_osm_xml_string;
 
+pub(crate) use model::POI_TAG_KEYS;
+
 #[cfg(test)]
 mod tests {
     use super::*;

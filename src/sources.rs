@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use anyhow::Result;
 
 use crate::filter::FeatureFilter;
-use crate::osm::{FeatureSource, OsmData, OsmPoiNode};
+use crate::osm::{FeatureSource, OsmData, OsmPoiNode, POI_TAG_KEYS};
 use crate::overture::OvertureParams;
 
 /// Policy for which POI source should appear in the normalized output.
@@ -137,9 +137,17 @@ fn name_raw(tags: &HashMap<String, String>) -> Option<&str> {
 /// key both return `None` and therefore compare equal — matching the original
 /// `"unknown" == "unknown"` behaviour without allocating the sentinel string.
 fn poi_category(tags: &HashMap<String, String>) -> Option<(&'static str, &str)> {
-    for key in [
-        "amenity", "shop", "tourism", "leisure", "historic", "man_made",
-    ] {
+    // ARC-105: POI_TAG_KEYS (the single source of truth in `osm::model`) feeds
+    // the first five categories. `man_made` stays as a dedupe-only extra so two
+    // `man_made` features do not dedupe against each other across categories.
+    // Runtime POI classification at the parsers uses ONLY POI_TAG_KEYS — the
+    // `man_made`/`natural` nodes intentionally over-fetched by
+    // `overpass::build_overpass_query` are NOT promoted to POIs by this
+    // function (this function is invoked only on POIs the parsers already
+    // retained). Lifting `man_made` into runtime classification would change
+    // user-visible data and is a product decision, not a refactor — see the
+    // ARC-105 comment at `overpass::build_overpass_query` for the query side.
+    for key in POI_TAG_KEYS.iter().copied().chain(["man_made"]) {
         if let Some(value) = tags.get(key) {
             return Some((key, value.as_str()));
         }

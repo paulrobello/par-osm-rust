@@ -27,6 +27,30 @@ Released versions are published to [crates.io](https://crates.io/crates/par-osm-
   error-path read is bounded at 64 KiB (only 4 KiB is surfaced into the
   error message after truncation, so reading more was waste).
 
+- **Platform-correct cache root resolution (ARC-110).** The shared cache
+  root is now resolved per platform conventions: on Windows `LOCALAPPDATA`
+  is preferred (unchanged) and `HOME/.cache/<app>` is the fallback; on Unix
+  (incl. macOS) `XDG_CACHE_HOME` is honored when set and non-empty, then
+  `HOME/.cache/<app>` is used as before. macOS deliberately stays on
+  `~/.cache/<app>` rather than `~/Library/Caches/<app>` so existing user
+  caches written by 0.1.x/0.2.x are not orphaned — migration to the
+  macOS-conventional location is deferred to a future release. The
+  `cfg!(windows)` gate is compile-time, so a misconfigured unix shell that
+  exports `LOCALAPPDATA` can no longer override the XDG/HOME-based path.
+  Explicit per-cache env overrides (`PAR_OSM_*_CACHE_DIR` → `*_CACHE_DIR` →
+  shared default) still win over all platform logic.
+
+- **Internal dedup without behavior change (ARC-105, ARC-111, ARC-112).**
+  POI classification tag keys (`amenity`/`shop`/`tourism`/`leisure`/
+  `historic`) are now expressed once via a single `POI_TAG_KEYS` constant
+  in `osm::model` consumed by both parsers and the dedupe helper
+  (ARC-105); the duplicated fetch/spawn/poll loops in the Overture CLI
+  orchestrator collapse into one policy-parameterized implementation plus
+  a shared `wait_with_timeout` subprocess helper (ARC-111); and the
+  Overpass cache containment lookup no longer re-reads each candidate's
+  metadata file (ARC-112). None of these change observable behavior —
+  parse/PBF/dedupe/cache test suites pass untouched.
+
 ### Security
 
 - **CI supply-chain hardening (SEC-106).** All third-party GitHub Actions

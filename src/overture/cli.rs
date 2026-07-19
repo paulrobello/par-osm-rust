@@ -74,20 +74,12 @@ pub fn is_cli_available() -> bool {
         return false;
     };
 
-    let start = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return status.success(),
-            Ok(None) => {
-                if start.elapsed() >= CLI_CHECK_TIMEOUT {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return false;
-                }
-                std::thread::sleep(CLI_POLL_INTERVAL);
-            }
-            Err(_) => return false,
-        }
+    // ARC-111 (≈ QA-112): the poll/kill/reap core is shared with the version
+    // probe and the main runner via `wait_with_timeout`. The availability
+    // check maps any error (try_wait failure or timeout) to `false`.
+    match wait_with_timeout(&mut child, CLI_CHECK_TIMEOUT) {
+        Ok(status) => status.success(),
+        Err(_) => false,
     }
 }
 
@@ -109,26 +101,25 @@ fn probe_cli_version_uncached() -> String {
         return "unknown".to_string();
     };
 
-    let start = Instant::now();
-    let exit_status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => {
-                if start.elapsed() >= CLI_CHECK_TIMEOUT {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return "unknown".to_string();
-                }
-                std::thread::sleep(CLI_POLL_INTERVAL);
-            }
-            Err(_) => return "unknown".to_string(),
-        }
+    // ARC-111 (≈ QA-112): shared poll/kill/reap core. Any error (try_wait
+    // failure or timeout) folds to `"unknown"` so a probe failure never
+    // blocks the fetch.
+    let exit_status = match wait_with_timeout(&mut child, CLI_CHECK_TIMEOUT) {
+        Ok(status) => status,
+        Err(_) => return "unknown".to_string(),
     };
 
     if !exit_status.success() {
         return "unknown".to_string();
     }
 
+    // QA-115 / ARC-111: stdout is read only after the child has exited.
+    // `--version` output is a short banner (well under 1 KiB), so it fits
+    // comfortably inside the OS pipe buffer (~64 KiB on Linux/macOS) and the
+    // writer side cannot deadlock against this reader. A larger stream read
+    // this way before exit WOULD deadlock (writer blocks once the pipe
+    // fills, child never reaches exit, we never reach `read_to_string`) —
+    // for that shape use the main runner's stderr-file pattern instead.
     let Some(mut stdout) = child.stdout.take() else {
         return "unknown".to_string();
     };
@@ -189,6 +180,42 @@ fn read_stderr_file(stderr_path: &Path, cli_type: &str) -> Result<Vec<u8>> {
         .with_context(|| format!("reading overturemaps stderr for type '{cli_type}'"))
 }
 
+/// Poll `child` for completion with [`CLI_POLL_INTERVAL`] cadence until it
+/// exits naturally or `timeout` elapses (ARC-111 ≈ QA-112).
+///
+/// Returns `Ok(status)` only when the child exited on its own. On timeout
+/// the child is killed and reaped, then `Err` is returned; a `try_wait`
+/// failure also returns `Err`. The three CLI subprocess sites in this
+/// module used to duplicate this poll/kill/reap core; they layer their own
+/// return shapes on top of this primitive:
+///
+/// * [`is_cli_available`] maps `Err` to `false`.
+/// * [`probe_cli_version_uncached`] maps `Err` to `"unknown"`.
+/// * [`wait_with_stderr_file_timeout`] (the main runner) maps `Err` to a
+///   stderr-contextualized timeout bail. The stderr-file plumbing stays at
+///   that call site — only the poll/kill/reap core is shared here.
+fn wait_with_timeout(
+    child: &mut std::process::Child,
+    timeout: Duration,
+) -> Result<std::process::ExitStatus> {
+    let start = Instant::now();
+    loop {
+        match child.try_wait().context("polling overturemaps CLI")? {
+            Some(status) => return Ok(status),
+            None => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    child
+                        .wait()
+                        .context("waiting for overturemaps CLI after timeout")?;
+                    bail!("overturemaps CLI timed out");
+                }
+                std::thread::sleep(CLI_POLL_INTERVAL);
+            }
+        }
+    }
+}
+
 fn wait_with_stderr_file_timeout(
     mut child: std::process::Child,
     stderr_path: &Path,
@@ -196,27 +223,23 @@ fn wait_with_stderr_file_timeout(
     timeout_secs: u64,
     cli_type: &str,
 ) -> Result<(std::process::ExitStatus, Vec<u8>)> {
-    let start = Instant::now();
-    loop {
-        match child.try_wait().context("polling overturemaps CLI")? {
-            Some(status) => {
-                let stderr = read_stderr_file(stderr_path, cli_type)?;
-                return Ok((status, stderr));
-            }
-            None => {
-                if start.elapsed() >= timeout {
-                    let _ = child.kill();
-                    child
-                        .wait()
-                        .context("waiting for overturemaps CLI after timeout")?;
-                    let stderr = read_stderr_file(stderr_path, cli_type)?;
-                    let stderr_msg = stderr_suffix(&stderr);
-                    bail!(
-                        "overturemaps CLI timed out after {timeout_secs}s for type '{cli_type}'{stderr_msg}"
-                    );
-                }
-                std::thread::sleep(CLI_POLL_INTERVAL);
-            }
+    // ARC-111 (≈ QA-112): delegate the poll/kill/reap core to
+    // `wait_with_timeout`; keep the stderr-file read + the rich timeout
+    // message at this call site so the timeout error text is preserved
+    // exactly (the main runner streams stderr to a file, which the shared
+    // helper does not know about).
+    match wait_with_timeout(&mut child, timeout) {
+        Ok(status) => {
+            let stderr = read_stderr_file(stderr_path, cli_type)?;
+            Ok((status, stderr))
+        }
+        Err(_) => {
+            // `wait_with_timeout` already killed and reaped the child.
+            let stderr = read_stderr_file(stderr_path, cli_type)?;
+            let stderr_msg = stderr_suffix(&stderr);
+            bail!(
+                "overturemaps CLI timed out after {timeout_secs}s for type '{cli_type}'{stderr_msg}"
+            );
         }
     }
 }
@@ -439,15 +462,88 @@ pub fn fetch_overture_data(
     params: &OvertureParams,
     progress_cb: &mut dyn FnMut(f32, &str),
 ) -> Result<OsmData> {
+    fetch_overture_with_policy(bbox, params, progress_cb, FailurePolicy::FailFast)
+}
+
+/// Like [`fetch_overture_data`] but never fails.
+///
+/// - If Overture is disabled, returns empty [`OsmData`].
+/// - If the CLI is unavailable, returns empty [`OsmData`] after logging a warning.
+/// - If a theme fetch fails, logs a warning and skips it.
+/// - If parsing a GeoJSON result fails, logs a warning and skips it.
+///
+/// Use this lower-level helper when callers want partial Overture data without
+/// bubbling errors. Applications that need explicit fallback status should prefer
+/// [`crate::sources::fetch_map_data`].
+pub fn fetch_overture_data_best_effort(
+    bbox: (f64, f64, f64, f64),
+    params: &OvertureParams,
+    progress_cb: &mut dyn FnMut(f32, &str),
+) -> OsmData {
+    match fetch_overture_with_policy(bbox, params, progress_cb, FailurePolicy::BestEffort) {
+        Ok(data) => data,
+        // BestEffort never produces an `Err` at the policy branches (disabled
+        // and CLI-unavailable both return `Ok(empty)`); the match arm exists
+        // only to satisfy the type system. If a per-theme error escaped the
+        // loop somehow, treat it as a skip and return whatever accumulated.
+        Err(_) => empty_osm_data(),
+    }
+}
+
+/// Per-theme error-handling policy for [`fetch_overture_with_policy`]
+/// (ARC-111 ≈ QA-112).
+///
+/// [`fetch_overture_data`] and [`fetch_overture_data_best_effort`] share
+/// every other step of the fetch/parse/merge/progress loop; the only axis
+/// of variation is what happens when a per-theme fetch or parse fails.
+/// This enum captures that single axis so the orchestration lives in
+/// exactly one place and the two public entry points cannot drift apart
+/// (the prior implementation required dual maintenance for every
+/// ARC-101-style change).
+enum FailurePolicy {
+    /// Propagate the first per-theme error via `?`, aborting the fetch.
+    FailFast,
+    /// Log the per-theme error and continue with the remaining themes.
+    BestEffort,
+}
+
+/// Shared per-cli_type fetch/parse/merge/progress loop for the Overture CLI
+/// orchestrator (ARC-111 ≈ QA-112).
+///
+/// Everything other than per-theme error handling is identical between
+/// [`fetch_overture_data`] and [`fetch_overture_data_best_effort`] and lives
+/// here exactly once: the `enabled` / CLI-availability guards, the version
+/// probe, the (theme, cli_type) flattening, the progress callback fractions,
+/// the per-fetch [`OvertureIdAllocator`] (ARC-101), the per-theme cache hit /
+/// miss + parse via [`fetch_one_theme`], the final stats log, and the
+/// trailing `1.0` progress ping.
+fn fetch_overture_with_policy(
+    bbox: (f64, f64, f64, f64),
+    params: &OvertureParams,
+    progress_cb: &mut dyn FnMut(f32, &str),
+    policy: FailurePolicy,
+) -> Result<OsmData> {
     if !params.enabled {
-        bail!("Overture Maps integration is not enabled");
+        return match policy {
+            FailurePolicy::FailFast => bail!("Overture Maps integration is not enabled"),
+            FailurePolicy::BestEffort => Ok(empty_osm_data()),
+        };
     }
     if !is_cli_available() {
-        bail!(
-            "The `overturemaps` CLI is not installed.\n\
-             Install it with: pip install overturemaps\n\
-             Then retry."
-        );
+        return match policy {
+            FailurePolicy::FailFast => bail!(
+                "The `overturemaps` CLI is not installed.\n\
+                 Install it with: pip install overturemaps\n\
+                 Then retry."
+            ),
+            FailurePolicy::BestEffort => {
+                log::warn!(
+                    "Overture Maps CLI not available — skipping Overture data.\n\
+                     Install with: pip install overturemaps"
+                );
+                Ok(empty_osm_data())
+            }
+        };
     }
 
     let cli_version = cached_cli_version();
@@ -464,7 +560,7 @@ pub fn fetch_overture_data(
 
     let cache_dir = overture_cache_dir();
 
-    // Flatten all (theme, cli_type) pairs so we can report progress as a
+    // Flatten all (theme, cli_type) pairs so progress can be reported as a
     // fraction of total work.
     let pairs: Vec<(OvertureTheme, &'static str)> = params
         .themes
@@ -486,73 +582,6 @@ pub fn fetch_overture_data(
         let pct = i as f32 / total;
         progress_cb(pct, &format!("Fetching Overture {cli_type}…"));
 
-        let data = fetch_one_theme(
-            *theme,
-            cli_type,
-            bbox,
-            params,
-            &cache_dir,
-            cli_version,
-            &mut id_alloc,
-        )?;
-        accumulated.merge(data);
-    }
-
-    log::info!(
-        "Overture Maps fetch complete ({} ways, {} POI nodes, {} address nodes)",
-        accumulated.ways.len(),
-        accumulated.poi_nodes.len(),
-        accumulated.addr_nodes.len(),
-    );
-    progress_cb(1.0, "Overture data ready");
-    Ok(accumulated)
-}
-
-/// Like [`fetch_overture_data`] but never fails.
-///
-/// - If Overture is disabled, returns empty [`OsmData`].
-/// - If the CLI is unavailable, returns empty [`OsmData`] after logging a warning.
-/// - If a theme fetch fails, logs a warning and skips it.
-/// - If parsing a GeoJSON result fails, logs a warning and skips it.
-///
-/// Use this lower-level helper when callers want partial Overture data without
-/// bubbling errors. Applications that need explicit fallback status should prefer
-/// [`crate::sources::fetch_map_data`].
-pub fn fetch_overture_data_best_effort(
-    bbox: (f64, f64, f64, f64),
-    params: &OvertureParams,
-    progress_cb: &mut dyn FnMut(f32, &str),
-) -> OsmData {
-    if !params.enabled {
-        return empty_osm_data();
-    }
-    if !is_cli_available() {
-        log::warn!(
-            "Overture Maps CLI not available — skipping Overture data.\n\
-             Install with: pip install overturemaps"
-        );
-        return empty_osm_data();
-    }
-
-    let cli_version = cached_cli_version();
-    let cache_dir = overture_cache_dir();
-
-    let pairs: Vec<(OvertureTheme, &'static str)> = params
-        .themes
-        .iter()
-        .flat_map(|&theme| theme.cli_types().into_iter().map(move |t| (theme, t)))
-        .collect();
-
-    let total = pairs.len() as f32;
-    let mut accumulated = empty_osm_data();
-
-    // One allocator per fetch (ARC-101) — see `fetch_overture_data`.
-    let mut id_alloc = OvertureIdAllocator::new();
-
-    for (i, (theme, cli_type)) in pairs.iter().enumerate() {
-        let pct = i as f32 / total;
-        progress_cb(pct, &format!("Fetching Overture {cli_type}…"));
-
         match fetch_one_theme(
             *theme,
             cli_type,
@@ -563,10 +592,26 @@ pub fn fetch_overture_data_best_effort(
             &mut id_alloc,
         ) {
             Ok(data) => accumulated.merge(data),
-            Err(e) => log::warn!("Skipping Overture type '{cli_type}': {e}"),
+            Err(e) => match policy {
+                FailurePolicy::FailFast => return Err(e),
+                FailurePolicy::BestEffort => {
+                    log::warn!("Skipping Overture type '{cli_type}': {e}");
+                }
+            },
         }
     }
 
+    // The completion stats log fires only in FailFast mode to preserve the
+    // observable behavior of the two prior implementations (the best-effort
+    // variant never emitted it). Both modes ping progress at 1.0.
+    if matches!(policy, FailurePolicy::FailFast) {
+        log::info!(
+            "Overture Maps fetch complete ({} ways, {} POI nodes, {} address nodes)",
+            accumulated.ways().len(),
+            accumulated.poi_nodes.len(),
+            accumulated.addr_nodes.len(),
+        );
+    }
     progress_cb(1.0, "Overture data ready");
-    accumulated
+    Ok(accumulated)
 }

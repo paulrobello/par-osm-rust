@@ -169,6 +169,16 @@ pub fn build_overpass_query(bbox: (f64, f64, f64, f64), filter: &FeatureFilter) 
     }
     parts.push(format!(r#"node["natural"="tree"]({b});"#));
     parts.push(format!(r#"node["natural"~"^(peak|rock|spring)$"]({b});"#));
+    // ARC-105: the query above intentionally over-fetches `man_made`
+    // (tower/water_tower/chimney) and `natural` (peak/rock/spring, plus
+    // `natural=tree` which IS retained as a tree node) standalone nodes.
+    // Runtime POI classification in `xml_parse`/`pbf` consumes ONLY
+    // `osm::model::POI_TAG_KEYS` (amenity/shop/tourism/leisure/historic),
+    // so the over-fetched `man_made` and non-tree `natural` nodes are
+    // currently retained as plain `OsmData` node entries — their tags are
+    // dropped at parse time and only their lat/lon reach the dataset.
+    // Promoting them into `poi_nodes` would change user-visible data and
+    // is a product decision flagged here, not a refactor to make silently.
 
     if parts.is_empty() {
         bail!("all feature types are disabled — nothing to query");

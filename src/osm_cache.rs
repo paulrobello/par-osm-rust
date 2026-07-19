@@ -336,8 +336,7 @@ fn meta_matches_overpass_url(dir: &std::path::Path, key: &str, canonical_url: &s
 }
 
 fn list_areas_in(dir: &std::path::Path) -> Vec<CacheEntry> {
-    raw_cache(dir)
-        .list()
+    list_metas_in(dir)
         .into_iter()
         .map(|(key, meta)| CacheEntry {
             key,
@@ -347,6 +346,19 @@ fn list_areas_in(dir: &std::path::Path) -> Vec<CacheEntry> {
             size_bytes: meta.size_bytes,
         })
         .collect()
+}
+
+/// Crate-internal listing that returns the full deserialized [`CacheMeta`]
+/// for each paired cache entry (ARC-112 ≡ QA-111).
+///
+/// The public [`list_areas_in`] projects each meta down to the public
+/// [`CacheEntry`] shape (which omits `overpass_url`); the URL-aware
+/// containment lookup [`find_containing_in_for_url`] consumes the full meta
+/// directly so it does not need to re-read the meta file per candidate.
+/// (`meta_matches_overpass_url` remains for the single-key URL-aware read
+/// path; this listing is the listing-path dedup.)
+fn list_metas_in(dir: &std::path::Path) -> Vec<(String, CacheMeta)> {
+    raw_cache(dir).list()
 }
 
 // ── Containment lookup ─────────────────────────────────────────────────────
@@ -403,15 +415,21 @@ fn find_containing_in_for_url(
     filter: &FeatureFilter,
     overpass_url: &str,
 ) -> Option<String> {
+    // ARC-112 (≡ QA-111): the metas are already in memory from
+    // `list_metas_in`, so filter them directly on containment + URL match.
+    // The previous implementation called `list_areas_in` (which dropped the
+    // `overpass_url` field) and then re-read + re-parsed each candidate's
+    // meta file via `meta_matches_overpass_url` — doubling the metadata I/O
+    // per lookup. The data file is still read exactly once for the match.
     let source = canonical_overpass_url(overpass_url);
     let (req_s, req_w, req_n, req_e) = bbox;
-    for entry in list_areas_in(dir) {
-        let [cs, cw, cn, ce] = entry.bbox;
+    for (key, meta) in list_metas_in(dir) {
+        let [cs, cw, cn, ce] = meta.bbox;
         let contained = cs <= req_s && cw <= req_w && cn >= req_n && ce >= req_e;
-        let filter_matches = entry.filter == *filter;
-        let source_matches = meta_matches_overpass_url(dir, &entry.key, &source);
+        let filter_matches = meta.filter == *filter;
+        let source_matches = meta.overpass_url.as_deref() == Some(source.as_str());
         if contained && filter_matches && source_matches {
-            return read_from(dir, &entry.key);
+            return read_from(dir, &key);
         }
     }
     None
