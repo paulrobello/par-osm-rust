@@ -201,8 +201,11 @@ changes are tagged **Breaking —** inline and require downstream `osm-to-bedroc
   `OnceLock`.
 - **`missing_docs` enforced (DOC-007).** Every public item now carries a doc
   comment, `#![warn(missing_docs)]` is enabled, and the crate carries
-  `#![doc(html_root_url = "https://docs.rs/par-osm-rust/0.2.0")]` so docs.rs
-  renders the README front page (DOC-012).
+  `#![doc(html_root_url = "https://docs.rs/par-osm-rust/0.2.0")]`. *(Correction
+  2026-07-18: `html_root_url` only sets the base URL for cross-crate rustdoc
+  links — it does not control what renders on docs.rs. The README is shown on
+  docs.rs because `README.md` is conventionally rendered as the crate root
+  page, and the same README renders as the front page on crates.io. DOC-010.)*
 
 ### Fixed
 
@@ -280,8 +283,8 @@ OSM XML/PBF parsing, normalized `OsmData` interchange, SRTM tile download, HGT
 elevation sampling, atomic write-then-rename cache discipline, and the
 `sources::fetch_map_data` orchestration entry point.
 
-[Unreleased]: https://github.com/paulrobello/par-osm-rust/compare/v0.2.1...HEAD
-[0.2.1]: https://github.com/paulrobello/par-osm-rust/compare/v0.2.0...v0.2.1
-[0.2.0]: https://github.com/paulrobello/par-osm-rust/compare/v0.1.1...v0.2.0
-[0.1.1]: https://github.com/paulrobello/par-osm-rust/compare/v0.1.0...v0.1.1
-[0.1.0]: https://github.com/paulrobello/par-osm-rust/releases/tag/v0.1.0
+[Unreleased]: https://github.com/paulrobello/par-osm-rust/compare/a104317...HEAD
+[0.2.1]: https://github.com/paulrobello/par-osm-rust/compare/a5e9a57...a104317
+[0.2.0]: https://github.com/paulrobello/par-osm-rust/compare/072c5b2...a5e9a57
+[0.1.1]: https://github.com/paulrobello/par-osm-rust/compare/42c3e49...072c5b2
+[0.1.0]: https://github.com/paulrobello/par-osm-rust/commit/42c3e49

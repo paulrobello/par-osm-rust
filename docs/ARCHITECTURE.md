@@ -225,7 +225,9 @@ Both raw caches (`osm_cache` for Overpass XML and `overture` for GeoJSON) layer 
 
 `osm::FeatureSource` tracks whether features came from OSM, Overture, or synthetic generation. Overture geometry receives synthetic negative node IDs to avoid collisions with real OSM IDs.
 
-`OsmData` is encapsulated: its collections are `pub(crate)`, so external consumers construct instances through `OsmData::new` and extend them with `push_way`, then read back through the `iter_ways`, `way_id_at`, and `validate_invariants` accessors. `OsmWay` carries its own `pub id: i64` as the single source of truth consumed by the writer and `ways_by_id` — the prior `(id, way)` pair plumbing is gone. `parse_osm_xml_file` streams large `.osm` extracts from disk via a `BufReader` so peak memory stays bounded.
+`OsmData` is encapsulated: its collections are `pub(crate)`, so external consumers construct instances through `OsmData::new` and extend them with `push_way`, then read back through the accessors. `OsmWay` carries its own `pub id: i64` as the single source of truth consumed by the writer and `ways_by_id` — the prior `(id, way)` pair plumbing is gone. `parse_osm_xml_file` streams large `.osm` extracts from disk via a `BufReader` so peak memory stays bounded.
+
+The read surface mirrors the encapsulated fields: `nodes()` borrows the node map keyed by OSM id, `ways()` borrows the ways slice in insertion order, and `ways_by_id()` borrows the way-id → ways-index lookup map that relation-member resolution consumes. These join the existing `iter_ways()` (iterator form of `ways()`), `way_id_at(index)` (recover a way's OSM id by position), and `validate_invariants()` (verifies the `ways` / `ways_by_id` pair, called automatically under `debug_assertions` from `new`/`push_way`) accessors. The pair was added in 0.2.1 so downstream consumers (`osm-to-bedrock`, `osm-world`) can resolve way node references and multipolygon relation members without escaping the encapsulation boundary.
 
 ## Overpass Integration
 

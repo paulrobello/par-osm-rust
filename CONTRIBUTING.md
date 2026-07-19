@@ -53,9 +53,16 @@ The target expands to:
 | `typecheck` | `cargo check --all-targets` | Catches type errors across targets |
 | `test` | `cargo test --all-features` | Runs the full test suite with all features on |
 
-`--all-features` matters: this crate has no optional features today, but CI
-must remain green against future feature-gated code paths. A PR that passes
-`cargo test` but fails `cargo test --all-features` is not ready to merge.
+`--all-features` matters today and tomorrow. The `blocking` feature
+(gated by `default = ["blocking"]` in `Cargo.toml`) pulls in the
+`reqwest`-based network surface — the `overpass` and `srtm` modules plus
+the Overture CLI orchestration in `overture::cli`. `--all-features` and
+the default build are currently the same set (the only feature is the
+default-on `blocking`), so the gate is future-proofing: a PR that passes
+`cargo test` but fails `cargo test --all-features` is not ready to merge,
+and `cargo test --no-default-features` must also stay green so the pure
+subset (data model, parsing, writing, cache I/O, filter, synthetic IDs,
+elevation) keeps compiling without the network stack.
 
 For narrower work, the individual targets (`make fmt`, `make lint`,
 `make typecheck`, `make test`) are available. The full gate is the source of
@@ -105,7 +112,7 @@ Examples from this repository's history:
 ```text
 feat: donate source_options parsers from osm-to-bedrock (ARC-011)
 fix(overpass): block redirects and cap error body (SEC-002, SEC-005)
-docs(audit): add comprehensive project audit (AUDIT.md)
+docs(architecture): sync ARCHITECTURE.md to 0.2.0 implementation
 chore: bump quick-xml 0.39→0.41 and migrate to normalized_value API
 ```
 
@@ -138,25 +145,49 @@ Conventions:
 
 - One short summary sentence, blank line, then the longer explanation.
 - Document every `pub` item, `pub` field, and `pub` enum variant. The crate
-  does not yet enforce `#![warn(missing_docs)]`, but `src/sources.rs` already
-  meets the bar so new code should not regress it.
-- Include `# Errors` on any function returning `Result`, explaining when and
-  why an error is returned.
-- Include `# Panics` on any function that can panic, with the precondition
-  that would prevent it.
-- Cross-reference other items with intra-doc links (`[\`SourceOptions\`]`,
-  `[\`fetch_map_data\`]`) so rustdoc renders them as links.
+  enforces this via `#![warn(missing_docs)]` in `src/lib.rs`, and
+  `cargo clippy --all-features -- -D warnings` turns the warning into a
+  build failure — so the gate stays green by construction. New public code
+  that skips doc comments fails CI immediately.
+- Include `# Errors` on every public function returning `Result`, naming
+  the conditions that produce `Err` (one to three lines, derived from the
+  function's actual `bail!`/`?` paths — never guess). The convention is
+  applied uniformly: SEC-101/102/104/105 documented the validators and
+  I/O paths; DOC-002 closed the remaining gap across the parser, cache,
+  and option-parser surfaces.
+- Include `# Panics` only where a public function can genuinely panic. The
+  current library has no such functions — debug asserts under
+  `debug_assertions` (e.g. `OsmData::validate_invariants`) do not count
+  per rustdoc convention. If you add an indexing, slice, or arithmetic
+  operation that can panic on bad input, document the precondition.
+- Cross-reference other items with intra-doc links (square brackets wrapping
+  a backtick-quoted symbol, e.g. `SourceOptions` or `fetch_map_data`) so
+  rustdoc renders them as links. Use plain backticks (no square brackets) when
+  referring to private or `pub(crate)` items — intra-doc links to non-`pub`
+  items emit a `private_intra_doc_links` warning, which the `-D warnings` gate
+  fails.
 - Mark example blocks with ` ```no_run ` when they touch the network or the
   filesystem, so `cargo test --doc` does not attempt to execute them.
 
-`cargo doc --no-deps -D rustdoc::broken_intra_doc_links` is part of the
-documentation CI job. A broken intra-doc link fails the build.
+The documentation CI job (`.github/workflows/ci.yml`, `docs` and `docs-lint`)
+runs `RUSTDOCFLAGS=-D warnings cargo doc --no-deps --all-features`,
+markdownlint-cli2 over `README.md`, `CONTRIBUTING.md`, `CHANGELOG.md`, and
+`docs/`, and lychee link-checking over the same set. A broken intra-doc
+link, an undocumented public item, or a stale markdown link each fail the
+build.
 
 ## Testing Conventions
 
-Tests are inline. Each module ends with a `#[cfg(test)] mod tests` block
-holding its own fixtures and assertions — there is no top-level `tests/`
-directory. Put new tests in the module that owns the code under test.
+Tests live in three places: inline `#[cfg(test)] mod tests` blocks at the
+bottom of each module (the bulk of the suite, holding their own fixtures
+and assertions), cross-format and round-trip tests under `tests/` (today a
+single `tests/integration.rs` covering XML round-trip, PBF→XML parity
+assertions, and merge-policy scenarios that span modules), and criterion
+benches under `benches/` (`parse_osm_xml`, `write_osm_xml`,
+`merge_source_data`) that double as perf-regression guards with embedded
+correctness assertions. Put new unit tests in the inline module that owns
+the code under test; reach for `tests/integration.rs` when a test needs to
+combine more than one public module.
 
 For source orchestration, use the dependency-injection seam. The public
 `fetch_map_data` delegates to `fetch_map_data_with_fetchers`, which takes the
@@ -181,23 +212,27 @@ side-effecting fetch, so tests can drive every `PoiSourceMode` and
 `OsmData` fixtures. Prefer this seam over mocking HTTP.
 
 When you add or change behavior, add a test that fails without the change and
-passes with it. The audit tracks uncovered areas explicitly (real PBF parsing,
-`write_osm_xml_string` round-trip, `clip_to_bbox`); contributions that close
-those gaps are welcome.
+passes with it. Known coverage gaps the audit flagged are tracked inline at
+the call sites that miss them (notably `.pbf` fixture coverage for
+`parse_pbf`, and broader parser-equivalence fixtures); contributions that
+close those gaps are welcome.
 
 ## Walkthrough: Adding a New OvertureTheme Variant
 
 This walkthrough enumerates every spot that must change when adding a new
 `OvertureTheme` variant. It is the canonical example of a cross-cutting change
 in this crate, because themes touch the enum, its mappings, parsing, the
-tag-mapping layer, the feature-routing layer, and tests.
+tag-mapping layer, the feature-routing layer, and tests. Since 0.2.0 the
+single `src/overture.rs` file has been split into `src/overture/{theme,parse,cache,cli}.rs`
+plus a thin `src/overture/mod.rs` re-exporting them (ARC-007 / QA-009), so
+the edits are spread across that subtree.
 
 Suppose you are adding a new theme, `OvertureTheme::Water` (used here purely
-as an example; the real `Base` theme already covers water). The full set of
-edits lives in `src/overture.rs` unless noted.
+as an example; the real `Base` theme already covers water).
 
-1. **The enum itself.** Add the variant to `pub enum OvertureTheme` with a
-   rustdoc comment describing what the theme represents.
+1. **The enum itself.** Add the variant to `pub enum OvertureTheme` in
+   `src/overture/theme.rs` with a rustdoc comment describing what the theme
+   represents.
 
 2. **`OvertureTheme::all()`.** Add the variant to the canonical ordering.
    This is the default theme list returned to applications that do not
@@ -214,27 +249,36 @@ edits lives in `src/overture.rs` unless noted.
    `Base` accepts `"base"`, `"land"`, `"land_use"`, `"landuse"`, and
    `"water"`.
 
-5. **`impl Display for OvertureTheme`.** Add the canonical lowercase string
-   for the new variant. This is used in logs, warnings, and cache keys.
+5. **`impl Display for OvertureTheme`** in `src/overture/theme.rs`. Add the
+   canonical lowercase string for the new variant. This is used in logs,
+   warnings, and the cache key.
 
-6. **`map_tags_for_theme()`.** Add a match arm that converts Overture feature
-   properties into OSM tags for the new theme. This is where Overture's
-   property schema becomes OSM-flavored tags that downstream consumers can
-   render.
+6. **`map_tags_for_theme()`** in `src/overture/theme.rs`. Add a match arm
+   that converts Overture feature properties into OSM tags for the new theme.
+   This is where Overture's property schema becomes OSM-flavored tags that
+   downstream consumers can render.
 
-7. **`parse_overture_geojson()`.** Add a match arm in the feature-routing
-   branch that decides which `OsmData` collection a feature of the new theme
-   lands in (`poi_nodes`, `addr_nodes`, or a way collection). For example,
-   `Place` routes to `poi_nodes` and `Address` routes to `addr_nodes`.
+7. **`parse_overture_geojson()`** in `src/overture/parse.rs`. Add a match
+   arm in the feature-routing branch that decides which `OsmData` collection
+   a feature of the new theme lands in (`poi_nodes`, `addr_nodes`, or a way
+   collection). For example, `Place` routes to `poi_nodes` and `Address`
+   routes to `addr_nodes`.
 
-8. **Tests at the bottom of `src/overture.rs`.** Add at least one
-   `parse_overture_geojson` test using a small fixture GeoJSON string, and at
-   least one `from_str_loose` test covering each new alias. Existing tests
+8. **Cache-key impact** in `src/overture/cache.rs`. The version-aware
+   `overture_cache_key_with_version` folds `cli_type` strings into the
+   SHA-256 input, so a new theme's `cli_types()` automatically produces
+   distinct keys — no hand-edit required. Add a test here only if you want
+   to lock in a specific canonical-form shape.
+
+9. **Tests** in the `#[cfg(test)] mod tests` block at the bottom of
+   `src/overture/mod.rs`. Add at least one `parse_overture_geojson` test
+   using a small fixture GeoJSON string, and at least one `from_str_loose`
+   test covering each new alias. Existing tests
    (`base_landuse_forest_subtype`, `from_str_loose_*`) are good templates.
 
-9. **Documentation.** If the theme list appears in user-facing docs, update
-   `README.md` (the "Overture Maps" section) and `docs/ARCHITECTURE.md` (the
-   Overture integration section).
+10. **Documentation.** If the theme list appears in user-facing docs, update
+    `README.md` (the "Overture Maps" section) and `docs/ARCHITECTURE.md`
+    (the Overture integration section).
 
 Modules that **do not** need changes:
 
@@ -280,4 +324,5 @@ concurrent callers and keeps the getters cheap to call repeatedly.
   tone, code block conventions, and Mermaid diagram standards for project
   documentation.
 - [Changelog](CHANGELOG.md) - Released changes, organized per Keep a
-  Changelog.
+  Changelog. The footer links resolve to commit-range comparisons on GitHub
+  (no release tags exist yet — see the README release checklist).

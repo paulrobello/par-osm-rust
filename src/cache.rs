@@ -117,6 +117,15 @@ pub fn overture_cache_dir() -> PathBuf {
 /// `~/.cache/osm-to-bedrock/{overpass,srtm,overture}` directories, call this
 /// before any cache access.
 ///
+/// # Errors
+///
+/// Returns `Err` if creating a shared cache directory, reading the legacy
+/// directory, or moving/copying an individual legacy entry fails. The
+/// function migrates the three subdirectories (overpass, srtm, overture) in
+/// sequence; the first subdirectory to fail short-circuits the remaining
+/// ones. A missing legacy directory is not an error and yields a zero-count
+/// report for that subdirectory.
+///
 /// # Examples
 ///
 /// Call once at startup, before any cache access. The function inspects and

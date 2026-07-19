@@ -233,6 +233,14 @@ pub struct ElevationData {
 
 impl ElevationData {
     /// Load from a `.hgt` file or a directory of `.hgt` files.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if `path` cannot be read, if a single-file load fails to
+    /// memory-map the tile (the path is a file but not a valid `.hgt`), or if
+    /// after scanning the directory no valid tile was loaded (each individual
+    /// tile failure inside the directory scan is logged at warn level and
+    /// skipped, so one corrupt tile among many does not abort the load).
     pub fn from_path(path: &Path) -> anyhow::Result<Self> {
         let mut tiles = HashMap::new();
 

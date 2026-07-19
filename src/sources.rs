@@ -539,6 +539,14 @@ where
 /// disabled, no Overture CLI check, cache read, or network request is performed
 /// even when `options.poi_source_mode` is [`PoiSourceMode::OverturePreferred`].
 ///
+/// # Errors
+///
+/// Propagates any error from the OSM (Overpass) fetch path, and from the
+/// Overture fetch path when `options.overture_failure_mode` is
+/// [`OvertureFailureMode::Fail`]. Under [`OvertureFailureMode::FallbackToOsm`]
+/// an Overture fetch failure is converted to a warning on the returned
+/// [`SourceFetchResult`] rather than an `Err`.
+///
 /// # Examples
 ///
 /// ```no_run

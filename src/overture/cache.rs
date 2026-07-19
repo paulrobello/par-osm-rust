@@ -300,6 +300,11 @@ pub fn overture_cache_read(dir: &Path, key: &str, ttl: Option<Duration>) -> Opti
 /// (meta sidecar finalized first, data renamed last). The committed/visible
 /// state is "both files present"; a crash before the final data rename leaves
 /// meta-without-data, which [`overture_cache_read`] treats as a miss.
+///
+/// # Errors
+///
+/// Returns `Err` if `key` fails the alphabet check, if metadata serialization
+/// fails, or if any I/O step in the atomic write-then-rename protocol fails.
 pub fn overture_cache_write(
     dir: &Path,
     key: &str,
@@ -363,6 +368,12 @@ pub fn list_overture_areas() -> Vec<OvertureCacheEntry> {
 /// Clear Overture cache entries, optionally only those older than `min_age`.
 ///
 /// Returns the number of entries deleted.
+///
+/// # Errors
+///
+/// Propagates the underlying I/O error if reading the Overture cache
+/// directory fails. A missing cache directory is not an error and returns
+/// `Ok(0)`.
 pub fn clear_overture_cache(min_age: Option<chrono::Duration>) -> Result<usize> {
     clear_overture_cache_dir(&overture_cache_dir(), min_age)
 }

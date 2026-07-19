@@ -53,8 +53,10 @@ const ALLOWED_OVERPASS_HOSTS: &[&str] = &[
 /// - specifies a port other than 443 (explicit `:443` or no port both pass), or
 /// - whose host is not in `ALLOWED_OVERPASS_HOSTS`.
 ///
-/// Returns `Ok(())` if the URL is acceptable, or an error with a descriptive
-/// message otherwise.
+/// # Errors
+///
+/// Returns `Err` with a descriptive message naming the failed check if `url`
+/// cannot be parsed by `Url::parse`, or if it violates any of the rules above.
 pub fn validate_overpass_url(url: &str) -> Result<()> {
     let parsed =
         Url::parse(url).map_err(|err| anyhow::anyhow!("Invalid Overpass URL '{url}': {err}"))?;
@@ -327,6 +329,13 @@ fn build_overpass_request(
 ///
 /// - `use_cache = true`:  check cache first; write to cache on miss.
 /// - `use_cache = false`: always fetch from Overpass; write result to cache.
+///
+/// # Errors
+///
+/// Propagates any error from [`validate_overpass_url`], [`fetch_osm_xml`]
+/// (HTTP failure, non-2xx status, busy/429, oversized body), or
+/// [`crate::osm::parse_osm_xml_str`] (malformed XML). Cache I/O failures
+/// (read miss, write failure) are logged and do not propagate.
 pub fn fetch_osm_data(
     bbox: (f64, f64, f64, f64),
     filter: &FeatureFilter,

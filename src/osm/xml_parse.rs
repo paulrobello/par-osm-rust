@@ -149,6 +149,13 @@ fn parse_member_attrs(e: &BytesStart<'_>) -> (String, i64, String) {
 /// slice with no copy of the input. The two entry points are now
 /// behaviorally identical by construction — only the reader source differs.
 ///
+/// # Errors
+///
+/// Returns an error if the XML is malformed (including the `MAX_XML_DEPTH`
+/// violation, SEC-004) or if a `<node>`/`<way>`/`<relation>` attribute
+/// cannot be parsed. No I/O is performed so no I/O errors surface here;
+/// see [`parse_osm_xml_file`] for the file-path equivalent.
+///
 /// # Examples
 ///
 /// ```
@@ -504,6 +511,15 @@ fn parse_osm_events<R: std::io::BufRead>(mut reader: Reader<R>) -> Result<OsmDat
 }
 
 /// Parse a `.osm` XML file into `OsmData`.
+///
+/// Reads the entire file into a `String` and delegates to
+/// [`parse_osm_xml_str`]. Prefer [`parse_osm_xml_file`] for large extracts:
+/// it streams through a `BufReader` and avoids the full-file string.
+///
+/// # Errors
+///
+/// Returns `Err` if the file cannot be read, or if the parsed XML fails
+/// [`parse_osm_xml_str`].
 pub fn parse_osm_xml(path: &Path) -> Result<OsmData> {
     let xml =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
@@ -512,6 +528,12 @@ pub fn parse_osm_xml(path: &Path) -> Result<OsmData> {
 
 /// Detect file format by extension and dispatch to the correct parser.
 /// Supports `.osm.pbf` / `.pbf` (PBF format) and `.osm` (XML format).
+///
+/// # Errors
+///
+/// Returns `Err` if the extension is anything other than `.pbf` or `.osm`,
+/// or if the dispatched-to parser ([`parse_pbf`] or [`parse_osm_xml`])
+/// returns `Err`.
 pub fn parse_osm_file(path: &Path) -> Result<OsmData> {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     match ext {

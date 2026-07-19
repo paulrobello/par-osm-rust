@@ -222,6 +222,11 @@ pub fn read_for_url(key: &str, overpass_url: &str) -> Option<String> {
 /// and records no Overpass endpoint in the metadata. Prefer [`write_for_url`],
 /// which stores the canonical `overpass_url` in the sidecar so subsequent
 /// reads via [`read_for_url`] can isolate entries per mirror.
+///
+/// # Errors
+///
+/// Returns `Err` if `key` fails the alphabet check, if metadata serialization
+/// fails, or if any I/O step in the atomic write-then-rename protocol fails.
 #[deprecated(
     since = "0.2.0",
     note = "use the URL-aware `write_for_url` instead; legacy writes do not record the Overpass endpoint"
@@ -239,6 +244,11 @@ pub fn write(
 ///
 /// `key` must match the cache's `[0-9a-zA-Z_-]` alphabet (SEC-105); an
 /// out-of-alphabet key returns `Err`.
+///
+/// # Errors
+///
+/// Returns `Err` if `key` fails the alphabet check, if metadata serialization
+/// fails, or if any I/O step in the atomic write-then-rename protocol fails.
 pub fn write_for_url(
     key: &str,
     bbox: (f64, f64, f64, f64),
@@ -256,6 +266,11 @@ pub fn list_areas() -> Vec<CacheEntry> {
 
 /// Delete cache entries older than `min_age` (or all if `None`).
 /// Returns the number of entries deleted.
+///
+/// # Errors
+///
+/// Returns `Err` if reading or deleting an entry's files fails. A missing
+/// cache directory is not an error and returns `Ok(0)`.
 pub fn clear(min_age: Option<chrono::Duration>) -> Result<usize> {
     clear_dir(&cache_dir(), min_age)
 }

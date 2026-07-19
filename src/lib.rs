@@ -64,6 +64,22 @@
 // `cargo clippy -- -D warnings`, so the gate stays green by construction.
 #![warn(missing_docs)]
 
+// DOC-011: pull README.md into the doctest suite so the ```rust,no_run
+// examples compile under `cargo test --doc --all-features`. Any drift
+// between the README snippets and the real API becomes a CI failure instead
+// of silent documentation rot. The struct form (vs. a `mod`) needs no
+// `missing_docs` waiver: the `#[doc = include_str!(...)]` attribute above
+// the struct supplies the doc comment.
+//
+// Gated on `feature = "blocking"` because every README example drives the
+// network surface (Overpass/SRTM/Overture fetchers) which the pure
+// `--no-default-features` subset does not compile — the lib.rs doctest
+// above uses the same gating. CI's `make checkall` runs with
+// `--all-features`, which is where drift detection fires.
+#[cfg(all(doctest, feature = "blocking"))]
+#[doc = include_str!("../README.md")]
+pub struct ReadmeDoctests;
+
 // SEC-104: shared bbox-validation helper used by `overpass` and `srtm`
 // (both blocking-only). Feature-gated to `blocking` so the pure
 // --no-default-features build does not emit a dead-code warning for the

@@ -2,8 +2,9 @@
   // markdownlint-cli2 configuration for par-osm-rust.
   //
   // The CI docs-lint job (.github/workflows/ci.yml) runs markdownlint-cli2 over
-  // README.md and docs/. Only rules that legitimately conflict with the
-  // project's prose style are relaxed; every other rule stays at its default.
+  // README.md, CONTRIBUTING.md, CHANGELOG.md, and docs/. Only rules that
+  // legitimately conflict with the project's prose style are relaxed; every
+  // other rule stays at its default.
   //
   // MD013 (line-length): disabled because README tables/prose and the Mermaid
   //   diagrams in docs/ARCHITECTURE.md routinely exceed 80 columns, and the
@@ -22,8 +23,8 @@
     "MD028": false
   },
   // Never lint generated/build artifacts even if a future glob sweep picks
-  // them up. The CI job already targets README.md and docs/, so these are
-  // purely defensive.
+  // them up. The CI job already targets README.md, CONTRIBUTING.md,
+  // CHANGELOG.md, and docs/, so these are purely defensive.
   "ignores": [
     "target/",
     "**/target/",

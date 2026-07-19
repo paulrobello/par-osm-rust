@@ -11,7 +11,7 @@ Shared Rust utilities for fetching, caching, parsing, and normalizing OpenStreet
 `par-osm-rust` is the data-source crate used by `osm-to-bedrock` and `osm-world`. It owns network and cache concerns only: Overpass/OSM fetching, optional Overture Maps fetching, source merge policy, OSM XML/PBF parsing, SRTM tile downloads, and HGT elevation lookup. It intentionally does **not** depend on Minecraft, WGPU, UI, renderer, or application-specific types.
 
 ```toml
-par-osm-rust = "0.2.0"
+par-osm-rust = "0.2"
 ```
 
 For local workspace development, use a path dependency instead:
@@ -23,8 +23,21 @@ par-osm-rust = { path = "../par-osm-rust" }
 Consumers that want only the pure subset (data model, parsing, writing, cache I/O, filter, synthetic IDs, elevation) without the blocking `reqwest` fetch surface can disable default features:
 
 ```toml
-par-osm-rust = { version = "0.2.0", default-features = false }
+par-osm-rust = { version = "0.2", default-features = false }
 ```
+
+## Contents
+
+- [What it provides](#what-it-provides)
+- [Quick start: fetch normalized map data](#quick-start-fetch-normalized-map-data)
+- [Source options and POI modes](#source-options-and-poi-modes)
+- [Overture Maps runtime dependency](#overture-maps-runtime-dependency)
+- [Cache locations](#cache-locations)
+- [Normalized OSM data model](#normalized-osm-data-model)
+- [SRTM elevation](#srtm-elevation)
+- [Documentation](#documentation)
+- [Release and publishing](#release-and-publishing)
+- [Verification](#verification)
 
 ## What it provides
 
@@ -179,7 +192,7 @@ Legacy caches from the older `osm-to-bedrock` layout can be migrated into the sh
 - `~/.cache/osm-to-bedrock/overture`
 - `~/.cache/osm-to-bedrock/srtm`
 
-**Consumers MUST call [`cache::migrate_legacy_caches`] once at startup** to move these directories. The `overpass_cache_dir`, `srtm_cache_dir`, and `overture_cache_dir` getters (and the `osm_cache::cache_dir` / `srtm::cache_dir` wrappers) are pure path resolution and do **not** migrate anything.
+**Consumers MUST call `cache::migrate_legacy_caches` once at startup** to move these directories. The `overpass_cache_dir`, `srtm_cache_dir`, and `overture_cache_dir` getters (and the `osm_cache::cache_dir` / `srtm::cache_dir` wrappers) are pure path resolution and do **not** migrate anything.
 
 ```rust,no_run
 fn main() -> anyhow::Result<()> {
@@ -225,7 +238,7 @@ The Overture cache has the equivalent `overture::list_overture_areas()` and `ove
 
 ## Normalized OSM data model
 
-The central type is `osm::OsmData`. The `ways` and `ways_by_id` fields are coupled (every way has exactly one entry in the index mapping its OSM id to its position) and are encapsulated: construction goes through [`osm::OsmData::new`] and incremental mutation through [`osm::OsmData::push_way`], so external code cannot put the pair out of sync. `OsmWay` carries its own `id: i64` field, so the index stays consistent without an inverse lookup. Accessors:
+The central type is `osm::OsmData`. The `ways` and `ways_by_id` fields are coupled (every way has exactly one entry in the index mapping its OSM id to its position) and are encapsulated: construction goes through `osm::OsmData::new` and incremental mutation through `osm::OsmData::push_way`, so external code cannot put the pair out of sync. `OsmWay` carries its own `id: i64` field, so the index stays consistent without an inverse lookup. Accessors:
 
 - `new(nodes, ways, relations, bounds, poi_nodes, addr_nodes, tree_nodes)` constructs an `OsmData` and seeds `ways_by_id` from each way's `id`.
 - `push_way(way)` appends a way and updates `ways_by_id` atomically.
@@ -311,6 +324,9 @@ fn main() -> anyhow::Result<()> {
 
 - [Architecture](docs/ARCHITECTURE.md) - System design, module boundaries, source flow, and cache architecture.
 - [Documentation Style Guide](docs/DOCUMENTATION_STYLE_GUIDE.md) - Standards for project documentation and diagrams.
+- [Contributing](CONTRIBUTING.md) - Setup, the verification gate, conventions, and walkthroughs for contributors.
+- [Changelog](CHANGELOG.md) - Released changes, organized per Keep a Changelog.
+- [License](LICENSE) - MIT, the same license under which the crate is published to crates.io.
 
 ## Release and publishing
 
@@ -332,6 +348,17 @@ cargo test --all-features
 cargo publish --dry-run
 ```
 
+### Release tags (TODO)
+
+No `v0.1.0`…`v0.2.1` tags exist yet. Until they are pushed, `CHANGELOG.md`
+points the version-comparison footer links at the release commits directly
+(GitHub compare accepts commit SHAs). When the next release ships, create an
+annotated tag at the version-bump commit (e.g. `git tag -a v0.2.2 <sha>`) and
+publish it with explicit user confirmation (`git push origin v0.2.2`), then
+repoint the corresponding CHANGELOG footer link from the SHA form to the
+tag form so future comparisons resolve to the conventional
+`compare/v<old>...v<new>` URLs.
+
 ## Verification
 
 The canonical local gate is `make checkall` — it mirrors what CI runs on every push and pull request:
@@ -349,7 +376,7 @@ make checkall
 | Type-check | `typecheck` | `cargo check --all-targets` |
 | Tests | `test` | `cargo test --all-features` |
 
-The individual targets (`make test`, `make lint`, `make fmt-check`, `make typecheck`) are available when you want to re-run just one step. Note that `make test` runs `cargo test --all-features` — stronger than bare `cargo test`, which would skip `#[cfg(feature = "blocking")]` tests.
+The individual targets (`make test`, `make lint`, `make fmt-check`, `make typecheck`) are available when you want to re-run just one step. Note that `make test` runs `cargo test --all-features` — this is future-proofing rather than a stronger gate today: `blocking` is a default feature, so bare `cargo test` already compiles and runs the same set. The `--all-features` flag exists so that any non-default feature added in a future release stays covered by the canonical gate. To verify the pure subset still compiles and passes, use `cargo test --no-default-features`.
 
 CI (`.github/workflows/ci.yml`) runs the `checkall` equivalents across an ubuntu/macos/windows matrix and adds jobs that are impractical to run locally on every save:
 

@@ -148,6 +148,14 @@ fn push_way_from_coords(
 /// allocator through `parse_overture_geojson_with_allocator` so the
 /// merged ways/`ways_by_id` invariant cannot be violated by two themes
 /// emitting the same IDs (ARC-101).
+///
+/// # Errors
+///
+/// Returns `Err` if `geojson_str` fails to parse as JSON or is not a
+/// `FeatureCollection` object. Individual features with missing or
+/// unrecognized geometries are silently skipped (logged at debug), not
+/// errors — partial output for a partially-formed input is the intended
+/// behavior.
 pub fn parse_overture_geojson(geojson_str: &str, theme: OvertureTheme) -> Result<OsmData> {
     let mut id_alloc = OvertureIdAllocator::new();
     parse_overture_geojson_with_allocator(geojson_str, theme, &mut id_alloc)

@@ -268,6 +268,14 @@ impl<Meta: CacheMeta> RawCache<Meta> {
     /// Orphaned data files (no paired meta) are removed opportunistically and
     /// do not count toward the returned total. Returns the number of paired
     /// entries removed.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the underlying I/O error if reading the cache directory
+    /// fails. A missing cache directory is not an error and returns `Ok(0)`.
+    /// Errors from deleting an individual file or reading an individual meta
+    /// sidecar are deliberately swallowed (logged at debug) so a single
+    /// unreadable entry does not abort the sweep.
     pub fn clear(&self, min_age: Option<chrono::Duration>) -> Result<usize> {
         if !self.dir.exists() {
             log::info!(

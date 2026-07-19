@@ -40,6 +40,13 @@ urlencoding = "2.1"
 # `blocking` feature (it is a dev-dep test/bench harness).
 criterion = "0.5"
 
+# DOC-011: docs.rs builds the crate with all features on so every public
+# item — including the `blocking`-gated modules — appears in the published
+# API reference. Full `doc_cfg` feature-labeling requires nightly attrs and
+# is deferred to a future release.
+[package.metadata.docs.rs]
+all-features = true
+
 # ARC-018: criterion requires `harness = false` on each bench target so it
 # can install its own `main`. One entry per file under benches/.
 [[bench]]

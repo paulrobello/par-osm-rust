@@ -21,6 +21,11 @@ use crate::sources::{OvertureFailureMode, PoiSourceMode};
 ///
 /// **Deprecated (ARC-102, never implemented; will be removed in 0.3.0).**
 /// The parsed value is accepted but never consulted by any merge path.
+///
+/// # Errors
+///
+/// Returns `Err` if `s` (case-insensitive) is not one of `"overture"`,
+/// `"osm"`, or `"both"`.
 #[deprecated(since = "0.2.2", note = "never implemented; will be removed in 0.3.0")]
 #[allow(deprecated)]
 pub fn parse_theme_priority(s: &str) -> Result<ThemePriority> {
@@ -36,6 +41,13 @@ pub fn parse_theme_priority(s: &str) -> Result<ThemePriority> {
 ///
 /// **Deprecated (ARC-102, never implemented; will be removed in 0.3.0).**
 /// The parsed map is accepted but never consulted by any merge path.
+///
+/// # Errors
+///
+/// Returns `Err` if any comma-separated entry is not of the form
+/// `"theme=priority"`, or if the theme fails `OvertureTheme::from_str_loose`,
+/// or if the priority fails `parse_theme_priority`. An empty input yields an
+/// empty map (not an error).
 #[deprecated(since = "0.2.2", note = "never implemented; will be removed in 0.3.0")]
 #[allow(deprecated)]
 pub fn parse_overture_priority(s: &str) -> Result<HashMap<OvertureTheme, ThemePriority>> {
@@ -64,6 +76,11 @@ pub fn parse_overture_priority(s: &str) -> Result<HashMap<OvertureTheme, ThemePr
 ///
 /// **Deprecated (ARC-102, never implemented; will be removed in 0.3.0).**
 /// The parsed map is accepted but never consulted by any merge path.
+///
+/// # Errors
+///
+/// Returns `Err` if any key fails `OvertureTheme::from_str_loose` or any
+/// value fails `parse_theme_priority`.
 #[deprecated(since = "0.2.2", note = "never implemented; will be removed in 0.3.0")]
 #[allow(deprecated)]
 pub fn parse_overture_priority_map(
@@ -81,6 +98,12 @@ pub fn parse_overture_priority_map(
 }
 
 /// Parse `"building,transportation,place"` into a `Vec<OvertureTheme>`.
+///
+/// # Errors
+///
+/// Returns `Err` if any comma-separated token fails
+/// `OvertureTheme::from_str_loose`. An empty input returns
+/// `OvertureTheme::all()` (not an error).
 pub fn parse_overture_themes(s: &str) -> Result<Vec<OvertureTheme>> {
     if s.is_empty() {
         return Ok(OvertureTheme::all());
@@ -95,6 +118,11 @@ pub fn parse_overture_themes(s: &str) -> Result<Vec<OvertureTheme>> {
 }
 
 /// Parse a JSON array style theme list. An empty list means all themes.
+///
+/// # Errors
+///
+/// Returns `Err` if any entry fails `OvertureTheme::from_str_loose`. An empty
+/// slice returns `OvertureTheme::all()` (not an error).
 pub fn parse_overture_theme_list(themes: &[String]) -> Result<Vec<OvertureTheme>> {
     if themes.is_empty() {
         return Ok(OvertureTheme::all());
@@ -112,6 +140,11 @@ pub fn parse_overture_theme_list(themes: &[String]) -> Result<Vec<OvertureTheme>
 /// Parse a [`PoiSourceMode`] from a string (`"osm-only"`, `"overture-only"`,
 /// `"both"`, or `"overture-preferred"` / `"preferred"`). Underscores are
 /// normalized to hyphens so `"osm_only"` is accepted as well.
+///
+/// # Errors
+///
+/// Returns `Err` if `s` (case-insensitive, underscores normalized to hyphens)
+/// is not one of the accepted mode names listed above.
 pub fn parse_poi_source_mode(s: &str) -> Result<PoiSourceMode> {
     match s.to_lowercase().replace('_', "-").as_str() {
         "osm" | "osm-only" => Ok(PoiSourceMode::OsmOnly),
@@ -127,6 +160,11 @@ pub fn parse_poi_source_mode(s: &str) -> Result<PoiSourceMode> {
 /// Parse an [`OvertureFailureMode`] from a string (`"fallback"` /
 /// `"fallback-to-osm"`, or `"fail"` / `"strict`). Underscores are normalized
 /// to hyphens so `"fallback_to_osm"` is accepted as well.
+///
+/// # Errors
+///
+/// Returns `Err` if `s` (case-insensitive, underscores normalized to hyphens)
+/// is not one of the accepted mode names listed above.
 pub fn parse_overture_failure_mode(s: &str) -> Result<OvertureFailureMode> {
     match s.to_lowercase().replace('_', "-").as_str() {
         "fallback" | "fallback-to-osm" => Ok(OvertureFailureMode::FallbackToOsm),
