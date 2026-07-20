@@ -35,6 +35,18 @@ Released versions are published to [crates.io](https://crates.io/crates/par-osm-
   and only warns. `fetch_osm_xml` is unchanged in behavior (now built over the
   shared `fetch_osm_response` request builder). Public API is unchanged.
 
+- **`map_tags_for_theme` is now table-driven (ENH-005).** The Overture → OSM
+  tag mapper — previously the #3 most complex function in the crate
+  (cyclomatic 26, "Critical" band) — is refactored into a declarative `Rule`
+  table per theme (Building/Transportation/Place/Address) plus a small
+  `apply_rules` interpreter, with the irregular Base classifier extracted
+  into a dedicated `map_base_tags` helper. Each Overture → OSM mapping is now
+  one visible, testable row instead of a branch in a Critical-complexity
+  function, so future Overture schema additions become one-line table edits.
+  Behavior is byte-identical (pinned by the existing theme tests plus five new
+  table-coverage tests). Pure internal refactor — no public API change, no
+  behavior change.
+
 ## [0.4.0] - 2026-07-19
 
 ### Added

@@ -25,26 +25,10 @@
 
 | # | ID | Title | Impact | Effort | Status |
 | --- | ---- | ------- | -------- | -------- | -------- |
-| 1 | ENH-005 | Table-driven `map_tags_for_theme` | Medium (maintainability) | Low-Medium | [ ] |
-| 2 | ENH-006 | Criterion benchmark regression tracking in CI | Medium (guardrail) | Medium | [ ] |
-| 3 | ENH-008 | Tag-storage allocation reduction (key interning) | Medium (perf/memory) | High | [ ] |
+| 1 | ENH-006 | Criterion benchmark regression tracking in CI | Medium (guardrail) | Medium | [ ] |
+| 2 | ENH-008 | Tag-storage allocation reduction (key interning) | Medium (perf/memory) | High | [ ] |
 
 ---
-
-## ENH-005 — Table-driven `map_tags_for_theme`
-
-`map_tags_for_theme` (`src/overture/theme.rs:118`) is the #3 most complex function in
-the crate (cyclomatic 26, "Critical" band per par-mem) — a hand-written match/if
-cascade translating Overture properties to OSM tags per theme. Refactoring it to a
-declarative mapping table (`&[(theme, source_key, target_tag, value_transform)]` or
-per-theme `const` rule slices) collapses the branching into one interpreter loop,
-makes each mapping independently visible/testable, and turns future Overture schema
-additions into one-line table edits instead of new branches in a Critical-complexity
-function.
-
-**Expected impact**: complexity 26 → ~6; safer Overture schema evolution. **Effort**:
-Low-Medium — half a day, behavior-pinned by existing tests. **Plan**:
-`docs/fable/ENH-005-table-driven-theme-mapping.md`
 
 ## ENH-006 — Criterion benchmark regression tracking in CI
 
