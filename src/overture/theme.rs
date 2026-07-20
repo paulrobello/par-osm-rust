@@ -133,8 +133,9 @@ fn map_place_category_to_osm_key(category: &str) -> &'static str {
 /// OSM tag key to write. The interpreter ([`apply_rules`]) owns all reading,
 /// coercion, and omission logic; a row is the smallest unit of behavior.
 enum Rule {
-    /// `props[src]` as str → `tags[dst]`. `default = None` omits the tag when
-    /// the source is missing or non-string; `Some(d)` always emits `d`.
+    /// `props[src]` as str → `tags[dst]`. The source value wins when present;
+    /// `default = None` omits the tag when the source is missing or non-string,
+    /// while `Some(d)` emits `d` as the fallback in that case.
     Str {
         src: &'static str,
         dst: &'static str,
