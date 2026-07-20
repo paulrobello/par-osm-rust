@@ -5,17 +5,20 @@
   Hand-written so every classification branch is exercised once:
     - 5 plain (untagged) nodes used by the two ways
     - 3 POI nodes       (amenity=cafe + name; man_made=tower + name; natural=peak + name)
+    - 1 non-POI tagged node (man_made=pier — value-filtered OUT of poi_nodes; ENH-003)
     - 1 address node    (addr:housenumber + addr:street)
     - 1 tree node       (natural=tree)
     - 1 open way        (highway=residential)
     - 1 closed way      (building=yes; first ref == last ref)
     - 1 multipolygon relation referencing the building way
-    - 10 nodes total
+    - 11 nodes total
 
   The two value-filtered POI keys (man_made/natural) are pinned here so the
   PBF parser is exercised by the same is_poi() predicate as the XML parser
-  (ENH-003). `natural=tree` is deliberately NOT in the POI set: it routes to
-  `tree_nodes` via a separate branch.
+  (ENH-003). `man_made=pier` pins the negative case: a non-allow-listed
+  man_made value stays OUT of poi_nodes (only in tagged_nodes), guarding
+  value-filtering on the PBF path. `natural=tree` is deliberately NOT in the
+  POI set: it routes to `tree_nodes` via a separate branch.
 
   The <bounds> element is set to the EXACT lat/lon extrema of the nodes, so the
   XML parser (which honors an explicit <bounds>) and the PBF parser (which
@@ -53,6 +56,12 @@
   <node id="104" lat="51.512" lon="-0.098" version="1">
     <tag k="natural" v="peak"/>
     <tag k="name" v="Parity Peak"/>
+  </node>
+
+  <!-- Non-POI tagged node: man_made=pier (ENH-003 — value-filtered OUT of poi_nodes) -->
+  <node id="105" lat="51.509" lon="-0.093" version="1">
+    <tag k="man_made" v="pier"/>
+    <tag k="name" v="Parity Pier"/>
   </node>
 
   <!-- Address node -->

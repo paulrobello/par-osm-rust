@@ -660,7 +660,7 @@ fn parse_pbf_matches_parse_osm_xml_for_equivalent_fixture() {
     // Node map identical (id → (lat, lon)). OsmNode has no PartialEq, so
     // compare lat/lon with a tolerance tighter than PBF's nano-degree (1e-9)
     // encoding.
-    assert_eq!(xml.nodes().len(), 10, "fixture has 10 nodes");
+    assert_eq!(xml.nodes().len(), 11, "fixture has 11 nodes");
     for (id, exp) in xml.nodes() {
         let got = pbf
             .nodes()
@@ -787,6 +787,15 @@ fn parse_pbf_classifies_poi_address_tree_and_tagged_nodes() {
             .all(|p| p.source == FeatureSource::Osm),
         "all PBF POIs must be OSM-sourced"
     );
+    // man_made=pier is value-filtered OUT of poi_nodes (only tower/water_tower/
+    // chimney qualify) — pins the negative case on the PBF path (ENH-003).
+    assert!(
+        pbf.poi_nodes()
+            .iter()
+            .all(|p| p.tags.get("man_made").map(String::as_str) != Some("pier")),
+        "man_made=pier must NOT be a POI: {:?}",
+        pbf.poi_nodes()
+    );
 
     // Address: addr:housenumber classifies into addr_nodes.
     assert_eq!(pbf.addr_nodes().len(), 1);
@@ -802,9 +811,16 @@ fn parse_pbf_classifies_poi_address_tree_and_tagged_nodes() {
     assert_eq!(pbf.tree_nodes().len(), 1);
 
     // ARC-004: every standalone tagged node lands in tagged_nodes — the
-    // lossless superset. The fixture has five tagged nodes (3 POIs + address +
-    // tree).
-    assert_eq!(pbf.tagged_nodes().len(), 5);
+    // lossless superset. The fixture has six tagged nodes (3 POIs + address +
+    // tree + the value-filtered man_made=pier).
+    assert_eq!(pbf.tagged_nodes().len(), 6);
+    assert!(
+        pbf.tagged_nodes()
+            .iter()
+            .any(|n| n.tags.get("man_made").map(String::as_str) == Some("pier")),
+        "man_made=pier survives in tagged_nodes: {:?}",
+        pbf.tagged_nodes()
+    );
 }
 
 #[test]
