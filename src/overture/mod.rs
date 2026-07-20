@@ -378,6 +378,106 @@ mod tests {
         assert_eq!(data.poi_nodes.len(), 0);
     }
 
+    // ── Table-coverage tests (ENH-005) ───────────────────────────────────
+    //
+    // One test per theme that exercises every rule row in a single feature
+    // and asserts the full expected tag map. These pin the wiring of the
+    // declarative rule tables in `theme.rs` independently of the per-field
+    // tests above.
+
+    #[test]
+    fn building_table_fires_all_rows() {
+        // All three BUILDING_RULES rows fire: class→building (Str with
+        // default), height→building:height (F64), num_floors→building:levels
+        // (U64).
+        let geojson = polygon_feature(serde_json::json!({
+            "class": "residential",
+            "height": 12.5,
+            "num_floors": 4
+        }));
+        let data = parse_overture_geojson(&geojson, OvertureTheme::Building).unwrap();
+        let tags = &data.ways[0].tags;
+        assert_eq!(tags.len(), 3);
+        assert_eq!(tags["building"], "residential");
+        assert_eq!(tags["building:height"], "12.5");
+        assert_eq!(tags["building:levels"], "4");
+    }
+
+    #[test]
+    fn transportation_table_fires_all_rows() {
+        // All five TRANSPORTATION_RULES rows fire, including both Flag rows
+        // (is_bridge AND is_tunnel set true together).
+        let geojson = line_feature(serde_json::json!({
+            "class": "primary",
+            "names": { "primary": "Main Street" },
+            "road_surface": "paved",
+            "is_bridge": true,
+            "is_tunnel": true
+        }));
+        let data = parse_overture_geojson(&geojson, OvertureTheme::Transportation).unwrap();
+        let tags = &data.ways[0].tags;
+        assert_eq!(tags.len(), 5);
+        assert_eq!(tags["highway"], "primary");
+        assert_eq!(tags["name"], "Main Street");
+        assert_eq!(tags["surface"], "paved");
+        assert_eq!(tags["bridge"], "yes");
+        assert_eq!(tags["tunnel"], "yes");
+    }
+
+    #[test]
+    fn place_table_fires_names_row_plus_category_block() {
+        // PLACE_RULES has one row (Nested2 names/primary→name); the bespoke
+        // categories.primary block must also still fire alongside it.
+        let geojson = point_feature(
+            -0.1,
+            51.5,
+            serde_json::json!({
+                "categories": { "primary": "restaurant" },
+                "names": { "primary": "The Bistro" }
+            }),
+        );
+        let data = parse_overture_geojson(&geojson, OvertureTheme::Place).unwrap();
+        let tags = &data.poi_nodes[0].tags;
+        assert_eq!(tags.len(), 2);
+        assert_eq!(tags["amenity"], "restaurant");
+        assert_eq!(tags["name"], "The Bistro");
+    }
+
+    #[test]
+    fn base_extracts_water_body_with_conditional_subtype_tag() {
+        // Base has no rule table (irregular groups live in `map_base_tags`).
+        // Exercise the water-body branch, which is the one that conditionally
+        // emits a second `water=<subtype>` tag distinct from `natural=water`.
+        let geojson = polygon_feature(serde_json::json!({
+            "subtype": "lake",
+            "class": "lake"
+        }));
+        let data = parse_overture_geojson(&geojson, OvertureTheme::Base).unwrap();
+        let tags = &data.ways[0].tags;
+        assert_eq!(tags.len(), 2);
+        assert_eq!(tags["natural"], "water");
+        assert_eq!(tags["water"], "lake");
+    }
+
+    #[test]
+    fn address_table_fires_all_rows() {
+        // Both ADDRESS_RULES rows fire: number→addr:housenumber (Str, no
+        // default) and street→addr:street (Str, no default).
+        let geojson = point_feature(
+            -0.2,
+            51.6,
+            serde_json::json!({
+                "number": "42",
+                "street": "Baker Street"
+            }),
+        );
+        let data = parse_overture_geojson(&geojson, OvertureTheme::Address).unwrap();
+        let tags = &data.addr_nodes[0].tags;
+        assert_eq!(tags.len(), 2);
+        assert_eq!(tags["addr:housenumber"], "42");
+        assert_eq!(tags["addr:street"], "Baker Street");
+    }
+
     // ── Edge cases ───────────────────────────────────────────────────────
 
     #[test]
