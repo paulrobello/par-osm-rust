@@ -234,14 +234,13 @@ fn parse_then_write_then_parse_preserves_full_osm_data() {
 
 #[test]
 fn tagged_nodes_preserves_nodes_the_curated_collections_drop() {
-    // ARC-004 + ENH-003: three standalone tagged nodes. A mountain peak
-    // (`natural=peak`), a man-made tower (`man_made=tower`), and a
-    // conventional POI (`amenity=cafe`). Under ENH-003 the value-aware
-    // `is_poi` predicate now classifies all three as POIs, so the curated
-    // `poi_nodes` keeps every one of them. `tagged_nodes` remains the
-    // lossless superset — and the load-bearing case here is that the peak's
-    // non-classifying tag (`ele=123`) survives intact on the `tagged_nodes`
-    // entry even though `poi_nodes` would have carried it too.
+    // ARC-004 + ENH-003: four standalone tagged nodes. Three are POIs the
+    // curated `poi_nodes` collection keeps (`natural=peak`, `man_made=tower`,
+    // `amenity=cafe`). The fourth — `natural=water` — is intentionally NOT
+    // a POI under ENH-003's value-aware rules (only peak/rock/spring qualify),
+    // not an address node, and not `natural=tree`, so every curated collection
+    // drops it. `tagged_nodes` is the only place it survives; that preservation
+    // is the load-bearing case this test name promises.
     const FIXTURE: &str = r#"<?xml version="1.0"?>
 <osm version="0.6">
   <bounds minlat="51.5" minlon="-0.10" maxlat="51.51" maxlon="-0.09"/>
@@ -258,11 +257,16 @@ fn tagged_nodes_preserves_nodes_the_curated_collections_drop() {
     <tag k="amenity" v="cafe"/>
     <tag k="name" v="Cafe"/>
   </node>
+  <node id="103" lat="51.508" lon="-0.097">
+    <tag k="natural" v="water"/>
+    <tag k="name" v="Test Pond"/>
+  </node>
 </osm>"#;
 
     let data = parse_osm_xml_str(FIXTURE).expect("parse");
 
-    // ENH-003: peak, tower, and cafe are all POIs now (value-aware rules).
+    // ENH-003: peak, tower, and cafe are POIs (value-aware rules); water is
+    // value-filtered out of poi_nodes.
     assert_eq!(data.poi_nodes().len(), 3);
     let poi_has = |key: &str, value: &str| {
         data.poi_nodes()
@@ -272,9 +276,20 @@ fn tagged_nodes_preserves_nodes_the_curated_collections_drop() {
     assert!(poi_has("natural", "peak"));
     assert!(poi_has("man_made", "tower"));
     assert!(poi_has("amenity", "cafe"));
+    assert!(
+        !poi_has("natural", "water"),
+        "natural=water must NOT be in poi_nodes: {:?}",
+        data.poi_nodes()
+    );
 
-    // tagged_nodes is the lossless superset: all three tagged nodes.
-    assert_eq!(data.tagged_nodes().len(), 3);
+    // `natural=water` is the genuinely-dropped node: no curated collection
+    // claims it (not a POI, not addr:housenumber, not natural=tree), so
+    // `tagged_nodes` is the only place it survives.
+    assert!(data.addr_nodes().is_empty());
+    assert!(data.tree_nodes().is_empty());
+
+    // tagged_nodes is the lossless superset: all four tagged nodes.
+    assert_eq!(data.tagged_nodes().len(), 4);
     let has = |key: &str, value: &str| {
         data.tagged_nodes()
             .iter()
@@ -283,6 +298,7 @@ fn tagged_nodes_preserves_nodes_the_curated_collections_drop() {
     assert!(has("natural", "peak"));
     assert!(has("man_made", "tower"));
     assert!(has("amenity", "cafe"));
+    assert!(has("natural", "water"));
 
     // The peak's non-classifying tags (`name`, `ele`) survive intact.
     let peak = data
@@ -293,10 +309,21 @@ fn tagged_nodes_preserves_nodes_the_curated_collections_drop() {
     assert_eq!(peak.tags.get("name").map(String::as_str), Some("Test Hill"));
     assert_eq!(peak.tags.get("ele").map(String::as_str), Some("123"));
 
-    // Round-trip through the writer must preserve peak/tower. Pre-0.3.1 the
-    // writer dropped them because they were never in a curated collection.
+    // The water node's full tag map survives ONLY in tagged_nodes.
+    let water = data
+        .tagged_nodes()
+        .iter()
+        .find(|n| n.tags.get("natural").map(String::as_str) == Some("water"))
+        .expect("water in tagged_nodes");
+    assert_eq!(
+        water.tags.get("name").map(String::as_str),
+        Some("Test Pond")
+    );
+
+    // Round-trip through the writer must preserve peak/tower/water. Pre-0.3.1
+    // the writer dropped them because they were never in a curated collection.
     let rewritten = parse_osm_xml_str(&write_osm_xml_string(&data)).expect("re-parse");
-    assert_eq!(rewritten.tagged_nodes().len(), 3);
+    assert_eq!(rewritten.tagged_nodes().len(), 4);
     assert!(
         rewritten
             .tagged_nodes()
@@ -308,6 +335,13 @@ fn tagged_nodes_preserves_nodes_the_curated_collections_drop() {
             .tagged_nodes()
             .iter()
             .any(|n| n.tags.get("man_made").map(String::as_str) == Some("tower"))
+    );
+    assert!(
+        rewritten
+            .tagged_nodes()
+            .iter()
+            .any(|n| n.tags.get("natural").map(String::as_str) == Some("water")),
+        "round-trip must preserve the non-POI water node via tagged_nodes"
     );
     // The curated POIs are re-derived on re-parse.
     assert_eq!(rewritten.poi_nodes().len(), 3);
@@ -747,7 +781,12 @@ fn parse_pbf_classifies_poi_address_tree_and_tagged_nodes() {
         "cafe POI present: {:?}",
         pbf.poi_nodes()
     );
-    assert_eq!(pbf.poi_nodes()[0].source, FeatureSource::Osm);
+    assert!(
+        pbf.poi_nodes()
+            .iter()
+            .all(|p| p.source == FeatureSource::Osm),
+        "all PBF POIs must be OSM-sourced"
+    );
 
     // Address: addr:housenumber classifies into addr_nodes.
     assert_eq!(pbf.addr_nodes().len(), 1);
