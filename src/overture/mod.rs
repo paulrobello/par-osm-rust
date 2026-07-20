@@ -460,6 +460,32 @@ mod tests {
     }
 
     #[test]
+    fn base_extracts_waterway_landcover_and_tree_branches() {
+        // `map_base_tags` has seven branches; the water-body and landuse arms
+        // are pinned above. These three cases cover branches that previously
+        // had no direct coverage: a waterway (subtype-derived tag), natural
+        // land cover keyed on BOTH subtype and class (the other irregular
+        // branch), and a tree.
+        let river = polygon_feature(serde_json::json!({ "subtype": "river" }));
+        let data = parse_overture_geojson(&river, OvertureTheme::Base).unwrap();
+        let tags = &data.ways[0].tags;
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags["waterway"], "river");
+
+        let land = polygon_feature(serde_json::json!({ "subtype": "", "class": "grass" }));
+        let data = parse_overture_geojson(&land, OvertureTheme::Base).unwrap();
+        let tags = &data.ways[0].tags;
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags["natural"], "grass");
+
+        let tree = polygon_feature(serde_json::json!({ "subtype": "tree" }));
+        let data = parse_overture_geojson(&tree, OvertureTheme::Base).unwrap();
+        let tags = &data.ways[0].tags;
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags["natural"], "tree");
+    }
+
+    #[test]
     fn address_table_fires_all_rows() {
         // Both ADDRESS_RULES rows fire: number→addr:housenumber (Str, no
         // default) and street→addr:street (Str, no default).
