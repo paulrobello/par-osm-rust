@@ -11,20 +11,6 @@
 
 use std::collections::{HashMap, HashSet};
 
-/// Tag keys whose presence on a standalone OSM node classifies it as a POI.
-///
-/// This is the **single source of truth** for runtime POI classification
-/// (ARC-105): the XML parser ([`super::xml_parse`]) and the PBF parser
-/// ([`super::pbf`]) both iterate this constant when deciding whether a node
-/// belongs in [`OsmData::poi_nodes`]. The dedupe helper
-/// `crate::sources::poi_category` extends this list with `man_made` as a
-/// dedupe-only extra category (two `man_made` POIs must not dedupe against
-/// each other across categories); runtime classification stays at these
-/// five keys so `man_made`/`natural` nodes intentionally over-fetched by
-/// `crate::overpass::build_overpass_query` are NOT silently promoted to
-/// POIs — see the ARC-105 comment in that function.
-pub(crate) const POI_TAG_KEYS: &[&str] = &["amenity", "shop", "tourism", "leisure", "historic"];
-
 /// One POI-classification rule: a tag key and, optionally, the only values of
 /// that key that qualify. `None` means any value of the key marks a POI (the
 /// legacy five keys); `Some` restricts the key to specific values because the
@@ -34,8 +20,8 @@ pub(crate) const POI_TAG_KEYS: &[&str] = &["amenity", "shop", "tourism", "leisur
 /// See [`POI_TAG_RULES`] for the active table and [`is_poi`] for the predicate
 /// both parsers share.
 pub(crate) struct PoiTagRule {
-    key: &'static str,
-    values: Option<&'static [&'static str]>,
+    pub(crate) key: &'static str,
+    pub(crate) values: Option<&'static [&'static str]>,
 }
 
 /// Single source of truth for runtime POI classification (ENH-003, extending

@@ -20,7 +20,7 @@ use crate::ProgressFn;
 #[cfg(feature = "blocking")]
 use crate::bbox::BBox;
 use crate::filter::FeatureFilter;
-use crate::osm::{FeatureSource, OsmData, OsmPoiNode, POI_TAG_KEYS};
+use crate::osm::{FeatureSource, OsmData, OsmPoiNode, POI_TAG_RULES};
 use crate::overture::OvertureParams;
 
 /// Policy for which POI source should appear in the normalized output.
@@ -144,25 +144,20 @@ fn name_raw(tags: &HashMap<String, String>) -> Option<&str> {
 
 /// Borrowed category key/value pair, or `None` when no POI category tag is present.
 ///
-/// Returns the first matching tag among `amenity`, `shop`, `tourism`, `leisure`,
-/// `historic`, `man_made` as `(&'static str, &str)` borrowed from `tags`, so dedupe
-/// comparisons allocate zero strings. Two POIs whose tags both miss every category
-/// key both return `None` and therefore compare equal — matching the original
+/// Iterates the same `osm::model::POI_TAG_RULES` table the parsers classify with
+/// (ARC-105 single-source invariant, extended by ENH-003), returning the first
+/// matching rule's `(key, value)` as `(&'static str, &str)` borrowed from `tags`,
+/// so dedupe comparisons allocate zero strings. `man_made` and `natural` are
+/// first-class categories here — no `.chain([...])` special-case — so a
+/// `natural=peak` POI lands in its own category instead of falling through to
+/// `None`. This function runs only on POIs the parsers already retained, so the
+/// rule tables agree end-to-end. Two POIs whose tags both miss every rule key
+/// both return `None` and therefore compare equal — matching the original
 /// `"unknown" == "unknown"` behaviour without allocating the sentinel string.
 fn poi_category(tags: &HashMap<String, String>) -> Option<(&'static str, &str)> {
-    // ARC-105: POI_TAG_KEYS (the single source of truth in `osm::model`) feeds
-    // the first five categories. `man_made` stays as a dedupe-only extra so two
-    // `man_made` features do not dedupe against each other across categories.
-    // Runtime POI classification at the parsers uses ONLY POI_TAG_KEYS — the
-    // `man_made`/`natural` nodes intentionally over-fetched by
-    // `overpass::build_overpass_query` are NOT promoted to POIs by this
-    // function (this function is invoked only on POIs the parsers already
-    // retained). Lifting `man_made` into runtime classification would change
-    // user-visible data and is a product decision, not a refactor — see the
-    // ARC-105 comment at `overpass::build_overpass_query` for the query side.
-    for key in POI_TAG_KEYS.iter().copied().chain(["man_made"]) {
-        if let Some(value) = tags.get(key) {
-            return Some((key, value.as_str()));
+    for rule in POI_TAG_RULES {
+        if let Some(value) = tags.get(rule.key) {
+            return Some((rule.key, value.as_str()));
         }
     }
     None
@@ -1270,6 +1265,53 @@ mod tests {
             kept.len(),
             1000,
             "each of 500 dups collapses onto its source"
+        );
+    }
+
+    #[test]
+    fn poi_category_recognizes_man_made_and_natural() {
+        // ENH-003: `poi_category` must iterate the same
+        // `osm::model::POI_TAG_RULES` table the parsers classify with, so
+        // `man_made` and `natural` POIs land in a recognized dedupe category.
+        // `natural=peak` is the load-bearing case — before this task the loop
+        // only chained `man_made`, so a `natural=peak` POI returned `None` and
+        // could spuriously dedupe against any other uncategorized POI.
+        let amenity = HashMap::from([("amenity".to_string(), "cafe".to_string())]);
+        assert_eq!(
+            poi_category(&amenity),
+            Some(("amenity", "cafe")),
+            "legacy amenity key still recognized"
+        );
+
+        let tower = HashMap::from([("man_made".to_string(), "tower".to_string())]);
+        assert_eq!(
+            poi_category(&tower),
+            Some(("man_made", "tower")),
+            "man_made=tower is a recognized category"
+        );
+
+        let peak = HashMap::from([("natural".to_string(), "peak".to_string())]);
+        assert_eq!(
+            poi_category(&peak),
+            Some(("natural", "peak")),
+            "natural=peak is the load-bearing new category"
+        );
+
+        // A POI whose only tag is on no rule key has no category and returns
+        // None — `poi_duplicates` then falls back to distance-only dedupe.
+        let highway = HashMap::from([("highway".to_string(), "residential".to_string())]);
+        assert!(
+            poi_category(&highway).is_none(),
+            "highway=residential is not a POI category"
+        );
+
+        // Two POIs in different categories must compare unequal so
+        // `poi_duplicates` does not collapse a tower onto a peak that happen
+        // to share a name and location.
+        assert_ne!(
+            poi_category(&tower),
+            poi_category(&peak),
+            "POIs in different categories must not dedupe"
         );
     }
 }
