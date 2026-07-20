@@ -85,21 +85,6 @@ pub(crate) const POI_TAG_RULES: &[PoiTagRule] = &[
 /// The XML parser ([`super::xml_parse`]) and the PBF parser ([`super::pbf`])
 /// both call this to decide `OsmData::poi_nodes` membership, keeping the two
 /// paths identical (ARC-105 single-source invariant, extended by ENH-003).
-//
-// `dead_code` is expected only on the lib profile: tests reference `is_poi`
-// (so it is alive in the lib-test profile), but no production caller exists
-// yet. Plain `#[expect]` would be unfulfilled under `--all-targets` because
-// the lib-test profile sees the symbol as live, so the expect is gated to
-// non-test builds. When ENH-003 Task 2 wires the first xml_parse caller,
-// `is_poi` becomes live on the lib profile too — the expect then goes
-// unfulfilled and fails the gate, forcing this attribute's removal.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "wired by xml_parse/pbf in ENH-003 Task 2; remove when the parsers gain an is_poi caller"
-    )
-)]
 pub(crate) fn is_poi(tags: &HashMap<String, String>) -> bool {
     POI_TAG_RULES.iter().any(|rule| {
         tags.get(rule.key)
@@ -236,7 +221,7 @@ pub struct OsmData {
     /// Every standalone node carrying one or more tags — the lossless superset
     /// of `poi_nodes` / `addr_nodes` / `tree_nodes`. Populated by the parsers so
     /// a consumer can run its own classification over tag keys the curated
-    /// collections deliberately exclude (e.g. `natural=peak`, `man_made=tower`).
+    /// collections deliberately exclude (e.g. `natural=water`, `man_made=pier`).
     /// Each entry retains the node's full tag map.
     pub(crate) tagged_nodes: Vec<OsmPoiNode>,
 }
@@ -530,8 +515,8 @@ impl OsmData {
     /// and [`OsmData::tree_nodes`]: every standalone node that carried one or
     /// more tags at parse time, with its full tag map preserved. Consumers that
     /// classify on tag keys outside the crate's curated POI set (e.g.
-    /// `natural=peak`, `man_made=*`) should iterate this slice rather than the
-    /// curated ones, which silently drop such nodes.
+    /// `natural=water`, `man_made=pier`) should iterate this slice rather than
+    /// the curated ones, which silently drop such nodes.
     pub fn tagged_nodes(&self) -> &[OsmPoiNode] {
         &self.tagged_nodes
     }

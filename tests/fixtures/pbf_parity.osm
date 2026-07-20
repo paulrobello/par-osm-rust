@@ -1,15 +1,21 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  PBF/XML parity fixture for ENH-002 (tests/integration.rs).
+  PBF/XML parity fixture for ENH-002 / ENH-003 (tests/integration.rs).
 
   Hand-written so every classification branch is exercised once:
     - 5 plain (untagged) nodes used by the two ways
-    - 1 POI node        (amenity=cafe + name)
+    - 3 POI nodes       (amenity=cafe + name; man_made=tower + name; natural=peak + name)
     - 1 address node    (addr:housenumber + addr:street)
     - 1 tree node       (natural=tree)
     - 1 open way        (highway=residential)
     - 1 closed way      (building=yes; first ref == last ref)
     - 1 multipolygon relation referencing the building way
+    - 10 nodes total
+
+  The two value-filtered POI keys (man_made/natural) are pinned here so the
+  PBF parser is exercised by the same is_poi() predicate as the XML parser
+  (ENH-003). `natural=tree` is deliberately NOT in the POI set: it routes to
+  `tree_nodes` via a separate branch.
 
   The <bounds> element is set to the EXACT lat/lon extrema of the nodes, so the
   XML parser (which honors an explicit <bounds>) and the PBF parser (which
@@ -35,6 +41,18 @@
   <node id="100" lat="51.505" lon="-0.095" version="1">
     <tag k="amenity" v="cafe"/>
     <tag k="name" v="Parity Café"/>
+  </node>
+
+  <!-- POI node: man_made=tower (ENH-003 value-filtered key) -->
+  <node id="103" lat="51.508" lon="-0.097" version="1">
+    <tag k="man_made" v="tower"/>
+    <tag k="name" v="Parity Tower"/>
+  </node>
+
+  <!-- POI node: natural=peak (ENH-003 value-filtered key) -->
+  <node id="104" lat="51.512" lon="-0.098" version="1">
+    <tag k="natural" v="peak"/>
+    <tag k="name" v="Parity Peak"/>
   </node>
 
   <!-- Address node -->

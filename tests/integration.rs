@@ -234,12 +234,14 @@ fn parse_then_write_then_parse_preserves_full_osm_data() {
 
 #[test]
 fn tagged_nodes_preserves_nodes_the_curated_collections_drop() {
-    // ARC-004: three standalone tagged nodes. A mountain peak (`natural=peak`)
-    // and a man-made tower (`man_made=tower`) use keys the crate's curated
-    // POI/address/tree collections deliberately ignore; a conventional POI
-    // (`amenity=cafe`) is in a curated collection and serves as a regression
-    // guard. `tagged_nodes` must retain all three with full tag maps; the
-    // curated `poi_nodes` must retain only the cafe.
+    // ARC-004 + ENH-003: three standalone tagged nodes. A mountain peak
+    // (`natural=peak`), a man-made tower (`man_made=tower`), and a
+    // conventional POI (`amenity=cafe`). Under ENH-003 the value-aware
+    // `is_poi` predicate now classifies all three as POIs, so the curated
+    // `poi_nodes` keeps every one of them. `tagged_nodes` remains the
+    // lossless superset — and the load-bearing case here is that the peak's
+    // non-classifying tag (`ele=123`) survives intact on the `tagged_nodes`
+    // entry even though `poi_nodes` would have carried it too.
     const FIXTURE: &str = r#"<?xml version="1.0"?>
 <osm version="0.6">
   <bounds minlat="51.5" minlon="-0.10" maxlat="51.51" maxlon="-0.09"/>
@@ -260,13 +262,16 @@ fn tagged_nodes_preserves_nodes_the_curated_collections_drop() {
 
     let data = parse_osm_xml_str(FIXTURE).expect("parse");
 
-    // The curated POI collection keeps only the cafe; peak and tower are not
-    // POI_TAG_KEYS, so without tagged_nodes they would be silently lost.
-    assert_eq!(data.poi_nodes().len(), 1);
-    assert_eq!(
-        data.poi_nodes()[0].tags.get("amenity").map(String::as_str),
-        Some("cafe")
-    );
+    // ENH-003: peak, tower, and cafe are all POIs now (value-aware rules).
+    assert_eq!(data.poi_nodes().len(), 3);
+    let poi_has = |key: &str, value: &str| {
+        data.poi_nodes()
+            .iter()
+            .any(|p| p.tags.get(key).map(String::as_str) == Some(value))
+    };
+    assert!(poi_has("natural", "peak"));
+    assert!(poi_has("man_made", "tower"));
+    assert!(poi_has("amenity", "cafe"));
 
     // tagged_nodes is the lossless superset: all three tagged nodes.
     assert_eq!(data.tagged_nodes().len(), 3);
@@ -304,8 +309,8 @@ fn tagged_nodes_preserves_nodes_the_curated_collections_drop() {
             .iter()
             .any(|n| n.tags.get("man_made").map(String::as_str) == Some("tower"))
     );
-    // The curated POI is re-derived on re-parse.
-    assert_eq!(rewritten.poi_nodes().len(), 1);
+    // The curated POIs are re-derived on re-parse.
+    assert_eq!(rewritten.poi_nodes().len(), 3);
 }
 
 #[test]
@@ -621,7 +626,7 @@ fn parse_pbf_matches_parse_osm_xml_for_equivalent_fixture() {
     // Node map identical (id → (lat, lon)). OsmNode has no PartialEq, so
     // compare lat/lon with a tolerance tighter than PBF's nano-degree (1e-9)
     // encoding.
-    assert_eq!(xml.nodes().len(), 8, "fixture has 8 nodes");
+    assert_eq!(xml.nodes().len(), 10, "fixture has 10 nodes");
     for (id, exp) in xml.nodes() {
         let got = pbf
             .nodes()
@@ -732,11 +737,15 @@ fn parse_pbf_classifies_poi_address_tree_and_tagged_nodes() {
     let pbf =
         parse_osm_file(Path::new("tests/fixtures/pbf_parity.osm.pbf")).expect("PBF fixture parses");
 
-    // POI: amenity=cafe is in POI_TAG_KEYS.
-    assert_eq!(pbf.poi_nodes().len(), 1);
-    assert_eq!(
-        pbf.poi_nodes()[0].tags.get("amenity").map(String::as_str),
-        Some("cafe")
+    // POI: amenity=cafe plus the two ENH-003 value-filtered POIs
+    // (man_made=tower, natural=peak).
+    assert_eq!(pbf.poi_nodes().len(), 3);
+    assert!(
+        pbf.poi_nodes()
+            .iter()
+            .any(|p| p.tags.get("amenity").map(String::as_str) == Some("cafe")),
+        "cafe POI present: {:?}",
+        pbf.poi_nodes()
     );
     assert_eq!(pbf.poi_nodes()[0].source, FeatureSource::Osm);
 
@@ -754,9 +763,9 @@ fn parse_pbf_classifies_poi_address_tree_and_tagged_nodes() {
     assert_eq!(pbf.tree_nodes().len(), 1);
 
     // ARC-004: every standalone tagged node lands in tagged_nodes — the
-    // lossless superset. The fixture has exactly three tagged nodes (POI +
-    // address + tree).
-    assert_eq!(pbf.tagged_nodes().len(), 3);
+    // lossless superset. The fixture has five tagged nodes (3 POIs + address +
+    // tree).
+    assert_eq!(pbf.tagged_nodes().len(), 5);
 }
 
 #[test]

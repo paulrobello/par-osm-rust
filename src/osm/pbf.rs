@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use osmpbf::{Element, ElementReader};
 
 use super::model::{
-    FeatureSource, OsmData, OsmNode, OsmPoiNode, OsmRelation, OsmWay, POI_TAG_KEYS, RelationMember,
+    FeatureSource, OsmData, OsmNode, OsmPoiNode, OsmRelation, OsmWay, RelationMember, is_poi,
 };
 
 /// Shared body of the `Element::Node` and `Element::DenseNode` branches in
@@ -56,7 +56,7 @@ fn process_pbf_node(
             source: FeatureSource::Osm,
         });
     }
-    if tags.keys().any(|k| POI_TAG_KEYS.contains(&k.as_str())) {
+    if is_poi(&tags) {
         poi_nodes.push(OsmPoiNode {
             lat,
             lon,

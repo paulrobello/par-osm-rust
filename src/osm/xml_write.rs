@@ -91,7 +91,7 @@ pub fn write_osm_xml_string(data: &OsmData) -> String {
     // ARC-004: when the parser populated the lossless `tagged_nodes` slice,
     // emit every standalone tagged node from it (one <node> per entry, full
     // tag map). This preserves nodes the curated poi/addr/tree collections
-    // drop on parse — e.g. `natural=peak`, `man_made=tower` — so a
+    // drop on parse — e.g. `natural=water`, `man_made=pier` — so a
     // write -> re-read round-trip through this writer no longer silently
     // loses them. When `tagged_nodes` is empty (an `OsmData` built directly
     // via the `with_poi_nodes` / `with_addr_nodes` / `with_tree_nodes`

@@ -20,7 +20,7 @@ use quick_xml::events::Event;
 use quick_xml::events::attributes::Attribute;
 
 use super::model::{
-    FeatureSource, OsmData, OsmNode, OsmPoiNode, OsmRelation, OsmWay, POI_TAG_KEYS, RelationMember,
+    FeatureSource, OsmData, OsmNode, OsmPoiNode, OsmRelation, OsmWay, RelationMember, is_poi,
 };
 use super::pbf::parse_pbf;
 
@@ -419,9 +419,7 @@ fn parse_osm_events<R: std::io::BufRead>(mut reader: Reader<R>) -> Result<OsmDat
                         // need the tag map) — clone for the first consumer and
                         // `mem::take` for the last. If exactly one classification
                         // fires, the tags move with zero clones.
-                        let is_poi = cur_node_tags
-                            .keys()
-                            .any(|k| POI_TAG_KEYS.contains(&k.as_str()));
+                        let node_is_poi = is_poi(&cur_node_tags);
                         let is_addr = cur_node_tags.contains_key("addr:housenumber");
                         let is_tree =
                             cur_node_tags.get("natural").map(|s| s.as_str()) == Some("tree");
@@ -436,7 +434,7 @@ fn parse_osm_events<R: std::io::BufRead>(mut reader: Reader<R>) -> Result<OsmDat
                                 source: FeatureSource::Osm,
                             });
                         }
-                        if is_poi && is_addr {
+                        if node_is_poi && is_addr {
                             let tags = std::mem::take(&mut cur_node_tags);
                             poi_nodes.push(OsmPoiNode {
                                 lat: cur_lat,
@@ -450,7 +448,7 @@ fn parse_osm_events<R: std::io::BufRead>(mut reader: Reader<R>) -> Result<OsmDat
                                 tags,
                                 source: FeatureSource::Osm,
                             });
-                        } else if is_poi {
+                        } else if node_is_poi {
                             poi_nodes.push(OsmPoiNode {
                                 lat: cur_lat,
                                 lon: cur_lon,

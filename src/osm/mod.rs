@@ -807,6 +807,129 @@ mod tests {
     }
 
     #[test]
+    fn parse_xml_classifies_value_filtered_poi_keys() {
+        // ENH-003: the shared `is_poi` predicate value-filters `man_made`
+        // (tower/water_tower/chimney) and `natural` (peak/rock/spring). The
+        // five cases below pin every arm of the table — `natural=tree` is
+        // NOT a POI and continues to route to `tree_nodes`.
+
+        // man_made=tower → in poi_nodes with the full tag map retained.
+        let data = parse_osm_xml_str(
+            r#"<?xml version="1.0"?>
+<osm version="0.6">
+  <node id="1001" lat="51.501" lon="-0.091">
+    <tag k="man_made" v="tower"/>
+    <tag k="name" v="Tower A"/>
+  </node>
+</osm>"#,
+        )
+        .unwrap();
+        assert_eq!(
+            data.poi_nodes.len(),
+            1,
+            "man_made=tower must land in poi_nodes"
+        );
+        assert_eq!(
+            data.poi_nodes[0].tags.get("man_made").map(String::as_str),
+            Some("tower")
+        );
+        assert_eq!(
+            data.poi_nodes[0].tags.get("name").map(String::as_str),
+            Some("Tower A"),
+            "tag map must be retained on the POI entry"
+        );
+        assert!(
+            data.nodes.contains_key(&1001),
+            "tagged node must also appear in the plain nodes map"
+        );
+
+        // man_made=pier → value-filtered out of poi_nodes.
+        let data = parse_osm_xml_str(
+            r#"<?xml version="1.0"?>
+<osm version="0.6">
+  <node id="1002" lat="51.502" lon="-0.092">
+    <tag k="man_made" v="pier"/>
+  </node>
+</osm>"#,
+        )
+        .unwrap();
+        assert!(
+            data.poi_nodes.is_empty(),
+            "man_made=pier must NOT be a POI: {:?}",
+            data.poi_nodes
+        );
+
+        // natural=peak → in poi_nodes.
+        let data = parse_osm_xml_str(
+            r#"<?xml version="1.0"?>
+<osm version="0.6">
+  <node id="1003" lat="51.503" lon="-0.093">
+    <tag k="natural" v="peak"/>
+    <tag k="name" v="Hilltop"/>
+  </node>
+</osm>"#,
+        )
+        .unwrap();
+        assert_eq!(
+            data.poi_nodes.len(),
+            1,
+            "natural=peak must land in poi_nodes"
+        );
+        assert_eq!(
+            data.poi_nodes[0].tags.get("natural").map(String::as_str),
+            Some("peak")
+        );
+        assert_eq!(
+            data.poi_nodes[0].tags.get("name").map(String::as_str),
+            Some("Hilltop")
+        );
+
+        // natural=tree → in tree_nodes, NOT in poi_nodes.
+        let data = parse_osm_xml_str(
+            r#"<?xml version="1.0"?>
+<osm version="0.6">
+  <node id="1004" lat="51.504" lon="-0.094">
+    <tag k="natural" v="tree"/>
+  </node>
+</osm>"#,
+        )
+        .unwrap();
+        assert!(
+            data.poi_nodes.is_empty(),
+            "natural=tree must NOT be in poi_nodes: {:?}",
+            data.poi_nodes
+        );
+        assert_eq!(
+            data.tree_nodes.len(),
+            1,
+            "natural=tree must land in tree_nodes"
+        );
+        assert!((data.tree_nodes[0].lat - 51.504).abs() < 1e-9);
+        assert!((data.tree_nodes[0].lon - -0.094).abs() < 1e-9);
+
+        // natural=water → value-filtered out of both poi_nodes and tree_nodes.
+        let data = parse_osm_xml_str(
+            r#"<?xml version="1.0"?>
+<osm version="0.6">
+  <node id="1005" lat="51.505" lon="-0.095">
+    <tag k="natural" v="water"/>
+  </node>
+</osm>"#,
+        )
+        .unwrap();
+        assert!(
+            data.poi_nodes.is_empty(),
+            "natural=water must NOT be in poi_nodes: {:?}",
+            data.poi_nodes
+        );
+        assert!(
+            data.tree_nodes.is_empty(),
+            "natural=water must NOT be in tree_nodes: {:?}",
+            data.tree_nodes
+        );
+    }
+
+    #[test]
     fn parse_xml_drops_relation_when_all_members_are_non_way() {
         let xml = r#"<?xml version="1.0"?>
 <osm version="0.6">
