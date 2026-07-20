@@ -1,7 +1,7 @@
 //! Shared byte-boundary-safe string truncation helpers.
 //!
 //! Two modules — [`crate::overpass`] (Overpass error-body truncation) and
-//! [`crate::overture::cli`] (Overture CLI stderr truncation) — need to clip a
+//! `crate::overture::cli` (Overture CLI stderr truncation) — need to clip a
 //! potentially large `&str` to a fixed byte budget without splitting a UTF-8
 //! code point. The two helpers below previously lived as verbatim copies in
 //! each module (QA-107); they are now consolidated here as crate-private
@@ -10,7 +10,7 @@
 //! Callers typically pair [`str_prefix_at_boundary`] + [`str_suffix_at_boundary`]
 //! to render a `head\n… omitted …\ntail` preview of an over-long string, using
 //! [`TRUNCATE_LIMIT`] as the per-side budget (see `truncate_error_body` in
-//! [`crate::overpass`] and `stderr_suffix` in [`crate::overture::cli`]).
+//! [`crate::overpass`] and `stderr_suffix` in `crate::overture::cli`).
 
 /// Default byte budget for truncating a large error / stderr payload before
 /// surfacing it in an `anyhow` error message. Both call sites use 4096 (8 KiB

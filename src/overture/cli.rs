@@ -1,7 +1,7 @@
 //! `overturemaps` CLI subprocess invocation and high-level fetch orchestration.
 //!
 //! The entire submodule is gated behind `#[cfg(feature = "blocking")]` at the
-//! `mod cli;` declaration in [`super::mod`] (ARC-012), so the items in this
+//! `mod cli;` declaration in `super` (ARC-012), so the items in this
 //! file do not carry their own per-item `cfg` gates.
 
 use anyhow::{Context, Result, bail};

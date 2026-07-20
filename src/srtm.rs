@@ -318,7 +318,7 @@ fn download_tile_with_retry(lat: i32, lon: i32, dest_dir: &Path, max_retries: u3
 /// the shared `emit_progress` helper).
 ///
 /// **Parallel downloads (ENH-001)**: Tiles download concurrently up to
-/// [`SRTM_DOWNLOAD_CONCURRENCY`] at a time. Progress callbacks may arrive
+/// `SRTM_DOWNLOAD_CONCURRENCY` at a time. Progress callbacks may arrive
 /// out of sequential tile order (the `tile_index` argument still identifies
 /// which tile started). Each tile is retried up to 3 times with exponential
 /// backoff (1 s, 2 s); retry backoff applies per tile and overlaps other
