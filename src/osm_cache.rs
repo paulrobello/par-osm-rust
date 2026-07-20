@@ -455,6 +455,129 @@ fn find_containing_in_for_url(
     None
 }
 
+// ── Streaming wrappers (ENH-004) ──────────────────────────────────────────
+//
+// Path-returning read/containment variants plus a bounded streaming write,
+// consumed only by the blocking Overpass fetch path (`crate::overpass`). All
+// gated to `blocking` for the same reason `text_truncate` is (see lib.rs):
+// without the feature these `pub(crate)` helpers would be dead code.
+
+/// Failure modes for [`stream_write_for_url`].
+///
+/// Splits a *hard* failure — the bounded body copy itself failed (over-cap or
+/// network I/O), so the body is lost and the fetch must propagate — from a
+/// *non-fatal* commit failure: the copy succeeded but promoting the temp into
+/// the cache failed, and the body survives in `temp` so the caller can still
+/// parse from it. That preserves the prior "a cache hiccup warns but does not
+/// break the fetch" contract under streaming, where the body no longer lives
+/// in memory.
+#[cfg(feature = "blocking")]
+#[derive(Debug)]
+pub(crate) enum StreamWriteError {
+    /// The bounded copy failed (over-cap or I/O). No body was captured.
+    Hard(anyhow::Error),
+    /// The copy succeeded but the cache commit failed. The full body survives
+    /// in `temp`; parse from `temp.path()` to still serve the fetch.
+    CommitFailed {
+        temp: tempfile::NamedTempFile,
+        error: anyhow::Error,
+    },
+}
+
+/// Return the on-disk path of `key`'s cached data when its metadata matches
+/// `overpass_url` and the data file is present, else `None`.
+///
+/// Path-returning twin of [`read_from_for_url`]: lets the fetch path hand a
+/// path to the streaming parser instead of reading the payload into a `String`.
+#[cfg(feature = "blocking")]
+pub(crate) fn data_path_for_url(
+    dir: &std::path::Path,
+    key: &Key,
+    overpass_url: &str,
+) -> Option<PathBuf> {
+    let source = canonical_overpass_url(overpass_url);
+    if meta_matches_overpass_url(dir, key, &source) {
+        let path = raw_cache(dir).data_path(key);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+/// Return the data path of the first entry whose bbox contains `bbox`, whose
+/// filter matches, and whose stored endpoint matches `overpass_url`, else `None`.
+///
+/// Path-returning twin of [`find_containing_in_for_url`]. (The two containment
+/// loops share their match logic; a future cleanup could extract the shared
+/// core — left parallel here to avoid touching the tested existing path.)
+#[cfg(feature = "blocking")]
+pub(crate) fn find_containing_path_for_url(
+    dir: &std::path::Path,
+    bbox: &BBox,
+    filter: &FeatureFilter,
+    overpass_url: &str,
+) -> Option<PathBuf> {
+    let source = canonical_overpass_url(overpass_url);
+    for (key, meta) in list_metas_in(dir) {
+        let [cs, cw, cn, ce] = meta.bbox;
+        let contained = cs <= bbox.south && cw <= bbox.west && cn >= bbox.north && ce >= bbox.east;
+        let filter_matches = meta.filter == *filter;
+        let source_matches = meta.overpass_url.as_deref() == Some(source.as_str());
+        if !(contained && filter_matches && source_matches) {
+            continue;
+        }
+        let validated = match Key::new(&key) {
+            Ok(k) => k,
+            Err(e) => {
+                log::warn!(
+                    "osm_cache: listed entry key {key:?} failed re-validation: {e}; skipping"
+                );
+                continue;
+            }
+        };
+        let path = raw_cache(dir).data_path(&validated);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+/// Stream `reader` into `key`'s cache entry (ENH-004), bounding the body at
+/// `max_bytes` and recording URL-aware metadata with an accurate `size_bytes`.
+///
+/// Captures the body into a cache-directory temp file (a single network read),
+/// then commits it via the QA-012 meta-first protocol. Returns the committed
+/// data path on success. A *hard* copy failure returns
+/// [`StreamWriteError::Hard`] with no body captured; a commit failure returns
+/// [`StreamWriteError::CommitFailed`] carrying the surviving temp so the caller
+/// can still parse from it.
+#[cfg(feature = "blocking")]
+pub(crate) fn stream_write_for_url<R: std::io::Read>(
+    dir: &std::path::Path,
+    key: &Key,
+    bbox: &BBox,
+    filter: &FeatureFilter,
+    reader: R,
+    max_bytes: u64,
+    overpass_url: &str,
+) -> std::result::Result<PathBuf, StreamWriteError> {
+    let (data_tmp, bytes) = raw_cache(dir)
+        .stream_to_temp(reader, max_bytes)
+        .map_err(StreamWriteError::Hard)?;
+    let meta = CacheMeta {
+        bbox: [bbox.south, bbox.west, bbox.north, bbox.east],
+        filter: filter.clone(),
+        created_at: Utc::now(),
+        size_bytes: bytes,
+        overpass_url: Some(canonical_overpass_url(overpass_url)),
+    };
+    raw_cache(dir)
+        .commit_temp(key, &meta, data_tmp)
+        .map_err(|(temp, error)| StreamWriteError::CommitFailed { temp, error })
+}
+
 fn clear_dir(dir: &std::path::Path, min_age: Option<chrono::Duration>) -> Result<usize> {
     // Delegates the age-based eviction and orphan sweep to [`RawCache::clear`].
     raw_cache(dir).clear(min_age)
@@ -464,6 +587,7 @@ fn clear_dir(dir: &std::path::Path, min_age: Option<chrono::Duration>) -> Result
 #[allow(deprecated)] // tests intentionally exercise the legacy cache_key family for coverage
 mod tests {
     use super::*;
+    use std::io::Cursor;
     use tempfile::TempDir;
 
     fn with_cache_dir() -> TempDir {
@@ -708,5 +832,132 @@ mod tests {
             listed.iter().all(|e| e.key != key_str),
             "meta-without-data orphan must not appear in list_areas_in"
         );
+    }
+
+    // ── ENH-004: streaming cache wrappers ────────────────────────────────
+
+    /// Small but realistic OSM XML body used by the streaming wrapper tests.
+    #[cfg(feature = "blocking")]
+    fn small_streaming_xml() -> &'static str {
+        r#"<?xml version="1.0"?>
+<osm version="0.6">
+  <node id="1" lat="51.5" lon="-0.10"/>
+  <way id="10"><nd ref="1"/><tag k="highway" v="residential"/></way>
+</osm>"#
+    }
+
+    #[cfg(feature = "blocking")]
+    #[test]
+    fn data_path_for_url_returns_path_on_hit_and_none_on_mismatch() {
+        let tmp = with_cache_dir();
+        let bbox = BBox::from((51.5_f64, -0.13_f64, 51.52_f64, -0.10_f64));
+        let url = "https://overpass-api.de/api/interpreter";
+        let key = cache_key_for_url(&bbox, &all_on(), url);
+        let xml = "<osm><node id='1'/></osm>";
+        write_to_for_url(tmp.path(), &key, &bbox, &all_on(), xml, url).unwrap();
+
+        let hit = data_path_for_url(tmp.path(), &key, url).expect("hit returns a path");
+        assert!(hit.exists(), "path must point at the data file");
+        assert_eq!(std::fs::read_to_string(&hit).unwrap(), xml);
+
+        // A different mirror's entry must not be served (URL isolation).
+        assert!(
+            data_path_for_url(
+                tmp.path(),
+                &key,
+                "https://overpass.kumi.systems/api/interpreter"
+            )
+            .is_none()
+        );
+    }
+
+    #[cfg(feature = "blocking")]
+    #[test]
+    fn find_containing_path_for_url_returns_path_for_sub_area() {
+        let tmp = with_cache_dir();
+        let large = BBox::from((51.5_f64, -0.13_f64, 51.52_f64, -0.10_f64));
+        let small = BBox::from((51.505, -0.125, 51.515, -0.105));
+        let url = "https://overpass-api.de/api/interpreter";
+        let key = cache_key_for_url(&large, &all_on(), url);
+        let xml = "<osm><node id='1'/></osm>";
+        write_to_for_url(tmp.path(), &key, &large, &all_on(), xml, url).unwrap();
+
+        let path =
+            find_containing_path_for_url(tmp.path(), &small, &all_on(), url).expect("sub-area hit");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), xml);
+
+        // Outside the cached bbox → None.
+        let outside = BBox::from((51.49, -0.13, 51.52, -0.10));
+        assert!(find_containing_path_for_url(tmp.path(), &outside, &all_on(), url).is_none());
+        // Different mirror → None.
+        assert!(
+            find_containing_path_for_url(
+                tmp.path(),
+                &small,
+                &all_on(),
+                "https://overpass.kumi.systems/api/interpreter"
+            )
+            .is_none()
+        );
+    }
+
+    #[cfg(feature = "blocking")]
+    #[test]
+    fn stream_write_for_url_round_trips_records_size_and_parses() {
+        let tmp = with_cache_dir();
+        let bbox = BBox::from((51.5_f64, -0.13_f64, 51.52_f64, -0.10_f64));
+        let url = "https://overpass-api.de/api/interpreter";
+        let key = cache_key_for_url(&bbox, &all_on(), url);
+        let xml = small_streaming_xml();
+
+        let path = stream_write_for_url(
+            tmp.path(),
+            &key,
+            &bbox,
+            &all_on(),
+            Cursor::new(xml.as_bytes().to_vec()),
+            1024,
+            url,
+        )
+        .expect("under-cap stream write commits");
+
+        // Byte-exact round-trip through stream → commit → read.
+        assert_eq!(
+            read_from_for_url(tmp.path(), &key, url).as_deref(),
+            Some(xml)
+        );
+        // size_bytes recorded in meta matches the streamed payload.
+        let meta = read_meta_from(tmp.path(), &key).expect("meta present");
+        assert_eq!(meta.size_bytes, xml.len() as u64);
+        // The streamed file parses via the streaming parser.
+        crate::osm::parse_osm_xml_file(&path).expect("streamed cache file parses");
+    }
+
+    #[cfg(feature = "blocking")]
+    #[test]
+    fn stream_write_for_url_over_cap_is_hard_error_and_writes_nothing() {
+        let tmp = with_cache_dir();
+        let bbox = BBox::from((51.5_f64, -0.13_f64, 51.52_f64, -0.10_f64));
+        let url = "https://overpass-api.de/api/interpreter";
+        let key = cache_key_for_url(&bbox, &all_on(), url);
+        let big = vec![b'x'; 65];
+
+        match stream_write_for_url(
+            tmp.path(),
+            &key,
+            &bbox,
+            &all_on(),
+            Cursor::new(big),
+            64,
+            url,
+        ) {
+            Err(StreamWriteError::Hard(e)) => assert!(
+                e.to_string().contains("64"),
+                "hard error should name the cap: {e}"
+            ),
+            other => panic!("expected Hard over-cap error, got {other:?}"),
+        }
+        // No entry committed on over-cap.
+        assert!(read_from_for_url(tmp.path(), &key, url).is_none());
     }
 }

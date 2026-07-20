@@ -9,6 +9,32 @@ Released versions are published to [crates.io](https://crates.io/crates/par-osm-
 
 ## [Unreleased]
 
+### Added
+
+- **Streaming cache primitives on `RawCache` (ENH-004).** The generic
+  `cache_store::RawCache` gains three public methods: `data_path(&Key)` (the
+  absolute `<dir>/<key>.<ext>` path, for handing a path to a streaming parser
+  instead of reading a cached payload into a `String`); `stream_to_temp(reader,
+  max_bytes)` (bounded copy into a cache-dir `NamedTempFile`, rejecting an
+  oversized body mid-copy and leaving no orphan on rejection); and
+  `commit_temp(key, meta, data_tmp)` (QA-012 meta-first / data-last commit that
+  hands the surviving temp file back on a commit failure). All additive; no
+  existing signature changed.
+
+### Changed
+
+- **`fetch_osm_data` now streams the Overpass response (ENH-004).** The
+  response body is no longer buffered into an in-memory `String` before
+  parsing. It is streamed straight into a cache-directory temp file bounded by
+  the SEC-109 cap, then parsed from that file with the streaming XML parser;
+  cache hits likewise parse the cached file by path. Peak memory on a large
+  fetch drops from roughly (body + parsed data) to (parsed data) alone — about
+  a 50% cut, eliminating the crate's single largest allocation. The prior
+  non-fatal-cache-write contract is preserved: if the bounded copy succeeds but
+  the cache commit fails, the fetch still parses from the surviving temp file
+  and only warns. `fetch_osm_xml` is unchanged in behavior (now built over the
+  shared `fetch_osm_response` request builder). Public API is unchanged.
+
 ## [0.4.0] - 2026-07-19
 
 ### Added

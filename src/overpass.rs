@@ -278,36 +278,32 @@ fn shared_client() -> Result<&'static reqwest::blocking::Client> {
     Ok(CLIENT.get_or_init(|| c))
 }
 
-/// Fetch raw OSM XML from the Overpass API for the given bounding box.
+/// Issue the Overpass POST for `bbox`/`filter` and return the streaming
+/// [`reqwest::blocking::Response`] **without consuming the body** (ENH-004).
 ///
-/// - Validates `overpass_url` against an approved host allowlist (SSRF guard).
-/// - Validates `bbox` before making any network request.
-/// - Returns a user-readable error for HTTP 429 (server busy).
-/// - Uses the pooled blocking `reqwest` client (call from `spawn_blocking`);
-///   see `shared_client` for why the client is reused across calls.
-/// - Follows no redirects: any 3xx is treated as an error so a compromised
-///   allowlisted mirror cannot redirect the POST to an internal host (the
-///   allowlist is only enforced against the initial URL).
+/// Single request builder shared by [`fetch_osm_xml`] (which buffers the body
+/// into a `String`) and [`fetch_osm_data`] (which streams it straight into the
+/// cache). Performs the SSRF URL validation, the `bbox`/filter query build, the
+/// pooled-client POST, the no-redirect policy, the 429 check, and the bounded
+/// error-body read — then hands back the success response so the caller can
+/// pull the body as a [`Read`] (`reqwest::blocking::Response` implements
+/// `std::io::Read`).
 ///
 /// # Errors
 ///
-/// Returns `Err` if the successful response body exceeds the internal
-/// `MAX_OVERPASS_RESPONSE_BYTES` cap (2 GiB, SEC-109). The body is read
-/// through a `take(MAX + 1)` adapter so an oversized response is rejected
-/// without buffering it fully; the error path is also bounded at the
-/// internal `MAX_OVERPASS_ERROR_BODY_READ_BYTES` because only a 4 KiB
-/// snippet is surfaced into the error message.
-pub fn fetch_osm_xml(
+/// Returns `Err` for an invalid/unapproved URL, an all-disabled filter, an HTTP
+/// failure, a non-2xx status (with a truncated body in the message), or HTTP
+/// 429 (server busy).
+fn fetch_osm_response(
     bbox: &BBox,
     filter: &FeatureFilter,
     overpass_url: &str,
     extra_hosts: &[String],
-) -> Result<String> {
+) -> Result<reqwest::blocking::Response> {
     validate_overpass_url_with_hosts(overpass_url, extra_hosts)?;
     let query = build_overpass_query(bbox, filter)?;
 
     let client = shared_client()?;
-
     let request = build_overpass_request(client, overpass_url, &query)?;
     let res = client.execute(request)?;
 
@@ -324,6 +320,41 @@ pub fn fetch_osm_xml(
         let body = truncate_error_body(&buf);
         bail!("Overpass API error ({status}): {body}");
     }
+    Ok(res)
+}
+
+/// Fetch raw OSM XML from the Overpass API for the given bounding box.
+///
+/// - Validates `overpass_url` against an approved host allowlist (SSRF guard).
+/// - Validates `bbox` before making any network request.
+/// - Returns a user-readable error for HTTP 429 (server busy).
+/// - Uses the pooled blocking `reqwest` client (call from `spawn_blocking`);
+///   see `shared_client` for why the client is reused across calls.
+/// - Follows no redirects: any 3xx is treated as an error so a compromised
+///   allowlisted mirror cannot redirect the POST to an internal host (the
+///   allowlist is only enforced against the initial URL).
+///
+/// Implemented over the private `fetch_osm_response` plus a capped
+/// `read_to_string`, so there is exactly one request builder. [`fetch_osm_data`]
+/// streams the body
+/// to disk instead of buffering; this function remains the buffer-based public
+/// entry point for callers that want the raw XML `String`.
+///
+/// # Errors
+///
+/// Returns `Err` if the successful response body exceeds the internal
+/// `MAX_OVERPASS_RESPONSE_BYTES` cap (2 GiB, SEC-109). The body is read
+/// through a `take(MAX + 1)` adapter so an oversized response is rejected
+/// without buffering it fully; the error path is also bounded at the
+/// internal `MAX_OVERPASS_ERROR_BODY_READ_BYTES` because only a 4 KiB
+/// snippet is surfaced into the error message.
+pub fn fetch_osm_xml(
+    bbox: &BBox,
+    filter: &FeatureFilter,
+    overpass_url: &str,
+    extra_hosts: &[String],
+) -> Result<String> {
+    let res = fetch_osm_response(bbox, filter, overpass_url, extra_hosts)?;
 
     // Bound the success body at MAX + 1 so an oversized response is rejected
     // without buffering it fully (SEC-109). Overpass returns UTF-8 XML, so
@@ -358,12 +389,27 @@ fn build_overpass_request(
 /// - `use_cache = true`:  check cache first; write to cache on miss.
 /// - `use_cache = false`: always fetch from Overpass; write result to cache.
 ///
+/// **Streaming (ENH-004).** The Overpass response is streamed directly into a
+/// cache-directory temp file bounded by the SEC-109 cap, then parsed from that
+/// file with the streaming XML parser — the full response body is never held in
+/// memory as a `String`, so peak memory on a large fetch is roughly the parsed
+/// [`OsmData`] alone (a ~50% cut versus the prior buffer-then-parse path, which
+/// kept body + parsed data resident at once). Cache hits likewise parse the
+/// cached file by path instead of reading it into a string.
+///
+/// **Non-fatal cache write.** If the bounded body copy succeeds but committing
+/// it into the cache fails (disk full, permissions, …), the fetch still parses
+/// from the surviving temp file and only warns — the cache is best-effort. (A
+/// failure *during* the bounded copy — over-cap or network I/O — propagates,
+/// since under streaming the body lives on disk rather than in memory.)
+///
 /// # Errors
 ///
 /// Propagates any error from [`validate_overpass_url`], [`fetch_osm_xml`]
-/// (HTTP failure, non-2xx status, busy/429, oversized body), or
-/// [`crate::osm::parse_osm_xml_str`] (malformed XML). Cache I/O failures
-/// (read miss, write failure) are logged and do not propagate.
+/// (HTTP failure, non-2xx status, busy/429), the SEC-109 cap (response exceeds
+/// the internal `MAX_OVERPASS_RESPONSE_BYTES` bound), or
+/// [`crate::osm::parse_osm_xml_file`] (malformed XML or an unreadable file). A
+/// commit-only cache failure is logged and downgraded as described above.
 pub fn fetch_osm_data(
     bbox: &BBox,
     filter: &FeatureFilter,
@@ -372,16 +418,19 @@ pub fn fetch_osm_data(
     extra_hosts: &[String],
 ) -> Result<OsmData> {
     let key = crate::osm_cache::cache_key_for_url(bbox, filter, overpass_url);
+    let cache_dir = crate::cache::overpass_cache_dir();
 
     if use_cache {
-        if let Some(xml) = crate::osm_cache::read_for_url(&key, overpass_url) {
+        if let Some(path) = crate::osm_cache::data_path_for_url(&cache_dir, &key, overpass_url) {
             log::info!("Cache hit for key {}", &key.as_str()[..8]);
-            return crate::osm::parse_osm_xml_str(&xml);
+            return crate::osm::parse_osm_xml_file(&path);
         }
-        // Second-chance: containment lookup
-        if let Some(xml) = crate::osm_cache::find_containing_for_url(bbox, filter, overpass_url) {
+        // Second-chance: containment lookup (path-based, parsed by streaming).
+        if let Some(path) =
+            crate::osm_cache::find_containing_path_for_url(&cache_dir, bbox, filter, overpass_url)
+        {
             log::info!("Cache containment hit — reusing larger cached area");
-            return crate::osm::parse_osm_xml_str(&xml);
+            return crate::osm::parse_osm_xml_file(&path);
         }
         log::info!(
             "Cache miss — fetching from Overpass (bbox {:?})",
@@ -391,13 +440,29 @@ pub fn fetch_osm_data(
         log::info!("Force-fetching from Overpass (bbox {:?})", bbox.swne());
     }
 
-    let xml = fetch_osm_xml(bbox, filter, overpass_url, extra_hosts)?;
-
-    if let Err(e) = crate::osm_cache::write_for_url(&key, bbox, filter, &xml, overpass_url) {
-        log::warn!("Cache write failed: {e}");
+    // ENH-004: stream the response straight to the cache directory, bounded by
+    // the SEC-109 cap, and parse from the resulting file — never materializing
+    // the full body as an in-memory String.
+    let res = fetch_osm_response(bbox, filter, overpass_url, extra_hosts)?;
+    match crate::osm_cache::stream_write_for_url(
+        &cache_dir,
+        &key,
+        bbox,
+        filter,
+        res,
+        MAX_OVERPASS_RESPONSE_BYTES,
+        overpass_url,
+    ) {
+        Ok(path) => crate::osm::parse_osm_xml_file(&path),
+        Err(crate::osm_cache::StreamWriteError::CommitFailed { temp, error }) => {
+            // Bounded copy succeeded but the cache commit failed. Preserve the
+            // prior non-fatal-cache-write contract: parse from the surviving
+            // temp so the fetch still succeeds (`temp` lives through the call).
+            log::warn!("Overpass cache commit failed ({error}); parsing without caching");
+            crate::osm::parse_osm_xml_file(temp.path())
+        }
+        Err(crate::osm_cache::StreamWriteError::Hard(error)) => Err(error),
     }
-
-    crate::osm::parse_osm_xml_str(&xml)
 }
 
 #[cfg(test)]

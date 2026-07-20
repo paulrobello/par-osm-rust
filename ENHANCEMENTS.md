@@ -25,30 +25,11 @@
 
 | # | ID | Title | Impact | Effort | Status |
 | --- | ---- | ------- | -------- | -------- | -------- |
-| 1 | ENH-004 | Streaming Overpass fetch→parse pipeline | High (memory) | Medium | [ ] |
-| 2 | ENH-005 | Table-driven `map_tags_for_theme` | Medium (maintainability) | Low-Medium | [ ] |
-| 3 | ENH-006 | Criterion benchmark regression tracking in CI | Medium (guardrail) | Medium | [ ] |
-| 4 | ENH-008 | Tag-storage allocation reduction (key interning) | Medium (perf/memory) | High | [ ] |
+| 1 | ENH-005 | Table-driven `map_tags_for_theme` | Medium (maintainability) | Low-Medium | [ ] |
+| 2 | ENH-006 | Criterion benchmark regression tracking in CI | Medium (guardrail) | Medium | [ ] |
+| 3 | ENH-008 | Tag-storage allocation reduction (key interning) | Medium (perf/memory) | High | [ ] |
 
 ---
-
-## ENH-004 — Streaming Overpass fetch→parse pipeline
-
-`fetch_osm_data` buffers the entire Overpass response into a `String` (hundreds of MB
-for large areas — SEC-109 adds a cap but keeps full buffering), then hands it to the
-parser. With QA-102 landed, the unified parse engine accepts any `BufRead` — and
-`reqwest::blocking::Response` implements `Read` — so the response can stream directly
-into the parser through a `BufReader`, never materializing the body. Peak memory for a
-fetch drops from (body + parsed data) to roughly (parsed data) alone. Caching
-complicates this: the raw body is currently written to the cache after parse, so the
-stream must tee into the cache file (stream to a temp file while parsing, or parse from
-the cached file after streaming to disk — the plan picks stream-to-disk-then-parse,
-which is simpler and still eliminates the in-memory body).
-
-**Expected impact**: ~50% peak-memory reduction on large fetches; removes the
-single largest allocation in the crate. **Effort**: Medium — 1 day. **Prerequisite
-(satisfied)**: QA-102 (unified engine, shipped). **Plan**:
-`docs/fable/ENH-004-streaming-overpass-parse.md`
 
 ## ENH-005 — Table-driven `map_tags_for_theme`
 

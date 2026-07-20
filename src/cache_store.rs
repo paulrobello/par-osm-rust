@@ -193,8 +193,17 @@ impl<Meta: CacheMeta> RawCache<Meta> {
         &self.dir
     }
 
-    fn data_path(&self, key: &str) -> PathBuf {
+    fn data_path_str(&self, key: &str) -> PathBuf {
         self.dir.join(format!("{key}.{}", self.data_ext))
+    }
+
+    /// Absolute path of `key`'s data file (`<dir>/<key>.<ext>`).
+    ///
+    /// Public so a streaming caller can hand a *path* to a streaming parser
+    /// instead of reading the cached payload into a `String` first (ENH-004:
+    /// the Overpass fetch path parses the cached file directly).
+    pub fn data_path(&self, key: &Key) -> PathBuf {
+        self.data_path_str(key.as_str())
     }
 
     fn meta_path(&self, key: &str) -> PathBuf {
@@ -214,7 +223,7 @@ impl<Meta: CacheMeta> RawCache<Meta> {
     /// the alphabet check is enforced at construction time and is not
     /// re-run here.
     pub fn read_data(&self, key: &Key) -> Option<String> {
-        let path = self.data_path(key.as_str());
+        let path = self.data_path(key);
         match std::fs::read_to_string(&path) {
             Ok(s) => Some(s),
             Err(e) => {
@@ -273,12 +282,99 @@ impl<Meta: CacheMeta> RawCache<Meta> {
 
         // 2. Data last: NamedTempFile + persist. This is the commit point —
         //    only after this rename are both files visible together.
-        let data_path = self.data_path(key.as_str());
+        let data_path = self.data_path(key);
         let mut data_tmp = tempfile::NamedTempFile::new_in(&self.dir)?;
         data_tmp.write_all(data.as_bytes())?;
         data_tmp.persist(&data_path)?;
 
         Ok(())
+    }
+
+    /// Stream `reader` into a fresh [`tempfile::NamedTempFile`] inside this
+    /// cache's directory, bounding the copy at `max_bytes` (ENH-004).
+    ///
+    /// The temp file lives in the cache directory so a later
+    /// [`commit_temp`](Self::commit_temp) promotes it to the data path via a
+    /// cheap same-filesystem rename. The cap is enforced *during* the copy via
+    /// `reader.take(max_bytes + 1)`: an oversized body is rejected without
+    /// ever being buffered fully, and on rejection the temp file is dropped
+    /// (removed) so no orphan leaks.
+    ///
+    /// Returns the temp handle and the number of bytes copied. The byte count
+    /// lets the caller populate an accurate `size_bytes` in the metadata
+    /// before committing.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the temp file cannot be created, if the copy hits an
+    /// I/O error, or if the reader yields more than `max_bytes` bytes.
+    pub fn stream_to_temp<R: std::io::Read>(
+        &self,
+        reader: R,
+        max_bytes: u64,
+    ) -> Result<(tempfile::NamedTempFile, u64)> {
+        let mut tmp = tempfile::NamedTempFile::new_in(&self.dir)?;
+        // take(max + 1) caps how many bytes io::copy pulls; if the reader has
+        // more than max_bytes we observe written > max_bytes and bail. The
+        // saturating_add avoids overflow when a caller passes u64::MAX.
+        let written = std::io::copy(&mut reader.take(max_bytes.saturating_add(1)), &mut tmp)?;
+        if written > max_bytes {
+            anyhow::bail!("streamed body exceeded {max_bytes} byte cap (read {written} bytes)");
+        }
+        Ok((tmp, written))
+    }
+
+    /// Promote an already-written body temp file into `key`'s cache entry
+    /// (ENH-004), preserving the QA-012 meta-first / data-last commit order
+    /// used by [`write`](Self::write).
+    ///
+    /// The metadata sidecar is staged and persisted first; only then is the
+    /// supplied `data_tmp` renamed into its final data path. A reader that
+    /// observes the directory mid-commit therefore never sees data-without-meta
+    /// (the legacy orphan shape) — at worst meta-without-data, which readers
+    /// treat as a miss.
+    ///
+    /// **Non-fatal cache write.** If the commit fails *after* the bounded body
+    /// copy already succeeded, the temp file handle is handed back in the
+    /// `Err` variant so the caller can still parse from it instead of losing
+    /// the fetched data. This preserves the prior "a cache hiccup warns but
+    /// does not break the fetch" contract under streaming, where the body no
+    /// longer lives in memory.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err((data_tmp, error))` — with the surviving temp handle — if
+    /// metadata serialization, the meta sidecar write, or the final data
+    /// rename fails.
+    pub fn commit_temp(
+        &self,
+        key: &Key,
+        meta: &Meta,
+        data_tmp: tempfile::NamedTempFile,
+    ) -> std::result::Result<PathBuf, (tempfile::NamedTempFile, anyhow::Error)> {
+        use std::io::Write;
+
+        // 1. Meta first (NamedTempFile + persist), mirroring `write`.
+        let meta_result: Result<()> = (|| {
+            let meta_json = serde_json::to_string(meta)?;
+            let mut meta_tmp = tempfile::NamedTempFile::new_in(&self.dir)?;
+            meta_tmp.write_all(meta_json.as_bytes())?;
+            meta_tmp.persist(self.meta_path(key.as_str()))?;
+            Ok(())
+        })();
+        if let Err(error) = meta_result {
+            // Body temp untouched — hand it back so the caller can still parse.
+            return Err((data_tmp, error));
+        }
+
+        // 2. Data last: rename the supplied temp into place (the commit point).
+        //    On failure, recover the handle from PersistError so the caller can
+        //    still parse from the temp file.
+        let data_path = self.data_path(key);
+        match data_tmp.persist(&data_path) {
+            Ok(_) => Ok(data_path),
+            Err(tempfile::PersistError { file, error }) => Err((file, error.into())),
+        }
     }
 
     /// List `(key, meta)` for every entry whose BOTH data and meta files are
@@ -298,7 +394,7 @@ impl<Meta: CacheMeta> RawCache<Meta> {
             let Some(key) = name.strip_suffix(".meta.json") else {
                 continue;
             };
-            if !self.data_path(key).exists() {
+            if !self.data_path_str(key).exists() {
                 continue; // orphan: meta without data
             }
             let Ok(raw) = std::fs::read_to_string(&path) else {
@@ -367,7 +463,7 @@ impl<Meta: CacheMeta> RawCache<Meta> {
                     continue; // fresh — keep it
                 }
             }
-            let _ = std::fs::remove_file(self.data_path(key));
+            let _ = std::fs::remove_file(self.data_path_str(key));
             let _ = std::fs::remove_file(self.meta_path(key));
             deleted += 1;
         }
@@ -380,6 +476,7 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use serde::Deserialize;
+    use std::io::Cursor;
     use tempfile::TempDir;
 
     /// Minimal metadata struct for exercising [`RawCache`] without pulling in
@@ -466,14 +563,14 @@ mod tests {
         cache.write(&paired, "<osm/>", &meta).expect("write paired");
 
         // Orphan data file (no meta) — the legacy pre-QA-012 shape.
-        std::fs::write(cache.data_path("orphan"), "<osm/>").unwrap();
+        std::fs::write(cache.data_path_str("orphan"), "<osm/>").unwrap();
 
         let deleted = cache.clear(None).expect("clear");
         assert_eq!(deleted, 1, "one paired entry removed");
-        assert!(!cache.data_path("paired").exists());
+        assert!(!cache.data_path_str("paired").exists());
         assert!(!cache.meta_path("paired").exists());
         assert!(
-            !cache.data_path("orphan").exists(),
+            !cache.data_path_str("orphan").exists(),
             "orphan data file should also be swept"
         );
     }
@@ -501,8 +598,8 @@ mod tests {
             .clear(Some(chrono::Duration::hours(1)))
             .expect("clear");
         assert_eq!(deleted, 1, "only the old entry is evicted");
-        assert!(!cache.data_path("old").exists());
-        assert!(cache.data_path("fresh").exists());
+        assert!(!cache.data_path_str("old").exists());
+        assert!(cache.data_path_str("fresh").exists());
     }
 
     // ── SEC-105: key alphabet validation ───────────────────────────────────
@@ -612,5 +709,138 @@ mod tests {
     fn to_hex_lowercase_and_two_chars_per_byte() {
         // Each byte maps to exactly two lowercase hex digits.
         assert_eq!(to_hex(&[0x00, 0x0f, 0x10, 0xff, 0xab]), "000f10ffab");
+    }
+
+    // ── ENH-004: streaming write primitives ───────────────────────────────
+    //
+    // `stream_to_temp` + `commit_temp` split the streaming write so the body
+    // can be captured bounded onto disk (one network read) and then promoted
+    // into the cache best-effort. See `RawCache::stream_to_temp` /
+    // `RawCache::commit_temp`.
+
+    #[test]
+    fn data_path_joins_dir_key_and_ext() {
+        let (tmp, cache) = open_cache("xml");
+        let key = Key::new("deadbeef").unwrap();
+        assert_eq!(
+            cache.data_path(&key),
+            tmp.path().join("deadbeef.xml"),
+            "data_path must be <dir>/<key>.<ext>"
+        );
+    }
+
+    #[test]
+    fn stream_to_temp_copies_content_under_cap_and_returns_bytes() {
+        let (_tmp, cache) = open_cache("xml");
+        let payload = b"<osm><node id='1'/></osm>";
+        let (file, written) = cache
+            .stream_to_temp(Cursor::new(payload.to_vec()), 1024)
+            .expect("under-cap stream succeeds");
+        assert_eq!(written as usize, payload.len(), "bytes written reported");
+        let on_disk = std::fs::read(file.path()).expect("temp file readable");
+        assert_eq!(on_disk, payload, "streamed bytes round-trip");
+    }
+
+    #[test]
+    fn stream_to_temp_accepts_reader_exactly_at_cap() {
+        // take(max + 1) admits exactly max_bytes; the boundary must pass.
+        let (_tmp, cache) = open_cache("xml");
+        let payload = vec![b'x'; 64];
+        let (_file, written) = cache
+            .stream_to_temp(Cursor::new(payload), 64)
+            .expect("exactly-at-cap must succeed");
+        assert_eq!(written, 64);
+    }
+
+    #[test]
+    fn stream_to_temp_rejects_reader_over_cap_and_leaves_no_temp() {
+        let (tmp, cache) = open_cache("xml");
+        let payload = vec![b'x'; 65];
+        let err = cache
+            .stream_to_temp(Cursor::new(payload), 64)
+            .expect_err("over-cap reader must be rejected");
+        assert!(
+            err.to_string().contains("64"),
+            "over-cap error should name the cap: {err}"
+        );
+        // The NamedTempFile is dropped on the error path, so the cache dir is
+        // left empty — no orphan temp file leaks.
+        let leftover = std::fs::read_dir(tmp.path())
+            .map(|it| it.count())
+            .unwrap_or(0);
+        assert_eq!(leftover, 0, "no temp file should remain after over-cap");
+    }
+
+    #[test]
+    fn commit_temp_persists_data_and_meta_round_trip() {
+        let (_tmp, cache) = open_cache("xml");
+        let key = Key::new("roundtrip123").unwrap();
+        let payload = b"<osm/>";
+        let (data_tmp, _bytes) = cache
+            .stream_to_temp(Cursor::new(payload.to_vec()), 1024)
+            .unwrap();
+        let meta = sample_meta();
+        let committed = cache
+            .commit_temp(&key, &meta, data_tmp)
+            .expect("commit succeeds");
+        assert_eq!(
+            committed,
+            cache.data_path(&key),
+            "returns the committed data path"
+        );
+        assert_eq!(
+            cache.read_data(&key).as_deref(),
+            Some("<osm/>"),
+            "data round-trips after commit"
+        );
+        let read = cache.read_meta(&key).expect("meta present");
+        assert_eq!(read.note, "test");
+    }
+
+    /// Meta type whose `Serialize` impl always fails — used to drive the
+    /// commit-failure path of [`RawCache::commit_temp`] and confirm the
+    /// bounded body is handed back instead of being dropped.
+    #[derive(Debug)]
+    struct AlwaysFailMeta;
+    impl Serialize for AlwaysFailMeta {
+        fn serialize<S: serde::Serializer>(&self, _s: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom("test-injected serialize failure"))
+        }
+    }
+    impl<'de> serde::Deserialize<'de> for AlwaysFailMeta {
+        fn deserialize<D: serde::Deserializer<'de>>(_d: D) -> Result<Self, D::Error> {
+            Ok(AlwaysFailMeta)
+        }
+    }
+    impl CacheMeta for AlwaysFailMeta {
+        fn created_at(&self) -> DateTime<Utc> {
+            Utc::now()
+        }
+    }
+
+    #[test]
+    fn commit_temp_returns_surviving_temp_when_meta_write_fails() {
+        // The non-fatal-cache-write contract: if the commit step fails AFTER
+        // the bounded body copy succeeded, the caller must get the temp file
+        // handle back so the fetch can still parse from it. A meta that fails
+        // to serialize triggers that path inside commit_temp.
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = RawCache::<AlwaysFailMeta>::new(tmp.path().to_path_buf(), "xml");
+        let key = Key::new("failedbody1").unwrap();
+        let payload = b"<osm><node id='1'/></osm>";
+        let (data_tmp, _) = cache
+            .stream_to_temp(Cursor::new(payload.to_vec()), 1024)
+            .unwrap();
+
+        let (surviving_tmp, err) = cache
+            .commit_temp(&key, &AlwaysFailMeta, data_tmp)
+            .expect_err("meta serialize failure must abort commit");
+        assert!(
+            err.to_string().contains("serialize"),
+            "error should be the meta failure: {err}"
+        );
+        // The body is still intact in the surviving temp file.
+        let on_disk = std::fs::read(surviving_tmp.path()).expect("surviving temp readable");
+        assert_eq!(on_disk, payload, "body must survive a commit failure");
     }
 }
