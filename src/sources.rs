@@ -151,7 +151,10 @@ fn name_raw(tags: &HashMap<String, String>) -> Option<&str> {
 /// first-class categories here — no `.chain([...])` special-case — so a
 /// `natural=peak` POI lands in its own category instead of falling through to
 /// `None`. This function runs only on POIs the parsers already retained, so the
-/// rule tables agree end-to-end. Two POIs whose tags both miss every rule key
+/// rule tables agree end-to-end; in particular `natural=tree` never reaches
+/// here because the parsers route it to `tree_nodes` via a separate branch, so
+/// the value-agnostic `natural` rule (which categorizes any `natural=*` tag it
+/// sees) is safe. Two POIs whose tags both miss every rule key
 /// both return `None` and therefore compare equal — matching the original
 /// `"unknown" == "unknown"` behaviour without allocating the sentinel string.
 fn poi_category(tags: &HashMap<String, String>) -> Option<(&'static str, &str)> {

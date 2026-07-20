@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 /// both parsers share.
 pub(crate) struct PoiTagRule {
     pub(crate) key: &'static str,
-    pub(crate) values: Option<&'static [&'static str]>,
+    values: Option<&'static [&'static str]>,
 }
 
 /// Single source of truth for runtime POI classification (ENH-003, extending
