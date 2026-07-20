@@ -25,6 +25,88 @@ use std::collections::{HashMap, HashSet};
 /// POIs — see the ARC-105 comment in that function.
 pub(crate) const POI_TAG_KEYS: &[&str] = &["amenity", "shop", "tourism", "leisure", "historic"];
 
+/// One POI-classification rule: a tag key and, optionally, the only values of
+/// that key that qualify. `None` means any value of the key marks a POI (the
+/// legacy five keys); `Some` restricts the key to specific values because the
+/// key alone is not POI-specific — e.g. `natural` is a POI only for
+/// peak/rock/spring, not water/wood/tree.
+///
+/// See [`POI_TAG_RULES`] for the active table and [`is_poi`] for the predicate
+/// both parsers share.
+pub(crate) struct PoiTagRule {
+    key: &'static str,
+    values: Option<&'static [&'static str]>,
+}
+
+/// Single source of truth for runtime POI classification (ENH-003, extending
+/// the ARC-105 invariant).
+///
+/// `amenity`/`shop`/`tourism`/`leisure`/`historic` qualify at any value (the
+/// legacy five keys). `man_made` qualifies only for `tower`/`water_tower`/
+/// `chimney` and `natural` only for `peak`/`rock`/`spring` — exactly the
+/// standalone-node sets `crate::overpass::build_overpass_query` fetches. Other
+/// values of those keys (e.g. `man_made=pier`, `natural=water`) are not POIs.
+/// `natural=tree` is deliberately absent: it is routed to `tree_nodes` by a
+/// separate parser branch, not the POI collection.
+pub(crate) const POI_TAG_RULES: &[PoiTagRule] = &[
+    PoiTagRule {
+        key: "amenity",
+        values: None,
+    },
+    PoiTagRule {
+        key: "shop",
+        values: None,
+    },
+    PoiTagRule {
+        key: "tourism",
+        values: None,
+    },
+    PoiTagRule {
+        key: "leisure",
+        values: None,
+    },
+    PoiTagRule {
+        key: "historic",
+        values: None,
+    },
+    PoiTagRule {
+        key: "man_made",
+        values: Some(&["tower", "water_tower", "chimney"]),
+    },
+    PoiTagRule {
+        key: "natural",
+        values: Some(&["peak", "rock", "spring"]),
+    },
+];
+
+/// Returns `true` when `tags` carry a POI-classifying entry: a key in
+/// [`POI_TAG_RULES`] whose value satisfies that rule's restriction.
+///
+/// The XML parser ([`super::xml_parse`]) and the PBF parser ([`super::pbf`])
+/// both call this to decide `OsmData::poi_nodes` membership, keeping the two
+/// paths identical (ARC-105 single-source invariant, extended by ENH-003).
+//
+// `dead_code` is expected only on the lib profile: tests reference `is_poi`
+// (so it is alive in the lib-test profile), but no production caller exists
+// yet. Plain `#[expect]` would be unfulfilled under `--all-targets` because
+// the lib-test profile sees the symbol as live, so the expect is gated to
+// non-test builds. When ENH-003 Task 2 wires the first xml_parse caller,
+// `is_poi` becomes live on the lib profile too — the expect then goes
+// unfulfilled and fails the gate, forcing this attribute's removal.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "wired by xml_parse/pbf in ENH-003 Task 2; remove when the parsers gain an is_poi caller"
+    )
+)]
+pub(crate) fn is_poi(tags: &HashMap<String, String>) -> bool {
+    POI_TAG_RULES.iter().any(|rule| {
+        tags.get(rule.key)
+            .is_some_and(|v| rule.values.is_none_or(|vals| vals.contains(&v.as_str())))
+    })
+}
+
 /// A geographic point from the OSM dataset.
 #[derive(Debug, Clone, Copy)]
 pub struct OsmNode {
@@ -631,6 +713,92 @@ impl OsmData {
         debug_assert!(
             self.validate_invariants().is_ok(),
             "OsmData::clip_to_bbox produced an inconsistent state"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a `HashMap<String, String>` from `&str` pairs.
+    fn tags(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn legacy_keys_classify_at_any_value() {
+        // amenity/shop/tourism/leisure/historic qualify at any value.
+        for (key, val) in [
+            ("amenity", "cafe"),
+            ("shop", "bakery"),
+            ("tourism", "hotel"),
+            ("leisure", "park"),
+            ("historic", "monument"),
+        ] {
+            assert!(
+                is_poi(&tags(&[(key, val)])),
+                "is_poi should be true for legacy key {key}={val}"
+            );
+        }
+    }
+
+    #[test]
+    fn man_made_value_filtered() {
+        // Only these three values qualify.
+        for val in ["tower", "water_tower", "chimney"] {
+            assert!(
+                is_poi(&tags(&[("man_made", val)])),
+                "is_poi should be true for man_made={val}"
+            );
+        }
+        // Other man_made values are not POIs.
+        for val in ["pier", "bridge"] {
+            assert!(
+                !is_poi(&tags(&[("man_made", val)])),
+                "is_poi should be false for man_made={val}"
+            );
+        }
+    }
+
+    #[test]
+    fn natural_value_filtered() {
+        // peak/rock/spring qualify.
+        for val in ["peak", "rock", "spring"] {
+            assert!(
+                is_poi(&tags(&[("natural", val)])),
+                "is_poi should be true for natural={val}"
+            );
+        }
+        // water/tree/wood are not POIs; `tree` is the load-bearing case — it
+        // must stay false here so the separate `tree_nodes` branch owns it.
+        for val in ["water", "tree", "wood"] {
+            assert!(
+                !is_poi(&tags(&[("natural", val)])),
+                "is_poi should be false for natural={val}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_poi_tags_are_false() {
+        for (key, val) in [
+            ("highway", "residential"),
+            ("addr:housenumber", "42"),
+            ("name", "Some Place"),
+        ] {
+            assert!(
+                !is_poi(&tags(&[(key, val)])),
+                "is_poi should be false for {key}={val}"
+            );
+        }
+        // Empty tag map.
+        assert!(
+            !is_poi(&HashMap::new()),
+            "is_poi should be false for an empty tag map"
         );
     }
 }
