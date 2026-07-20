@@ -25,11 +25,11 @@
 | --- | ---- | ------- | -------- | -------- | -------- |
 | 1 | ENH-001 | Parallel SRTM tile downloads | High (wall-clock) | Medium | [x] — done 2026-07-19, df2eed9 |
 | 2 | ENH-002 | PBF test fixture + format coverage | High (coverage) | Low-Medium | [x] — done 2026-07-19, a09d55d |
-| 3 | ENH-003 | POI coverage completion (`man_made`/`natural`) | Medium (data value) | Low | [ ] |
+| 3 | ENH-003 | POI coverage completion (`man_made`/`natural`) | Medium (data value) | Low | [x] — done 2026-07-19, a2ef3fb |
 | 4 | ENH-004 | Streaming Overpass fetch→parse pipeline | High (memory) | Medium | [ ] |
 | 5 | ENH-005 | Table-driven `map_tags_for_theme` | Medium (maintainability) | Low-Medium | [ ] |
 | 6 | ENH-006 | Criterion benchmark regression tracking in CI | Medium (guardrail) | Medium | [ ] |
-| 7 | ENH-007 | 0.3.0 API modernization release plan | High (API quality) | High | [ ] |
+| 7 | ENH-007 | 0.3.0 API modernization release plan | High (API quality) | High | [x] — done 2026-07-18, 4418222 |
 | 8 | ENH-008 | Tag-storage allocation reduction (key interning) | Medium (perf/memory) | High | [ ] |
 
 ---

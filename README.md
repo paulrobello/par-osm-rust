@@ -11,7 +11,7 @@ Shared Rust utilities for fetching, caching, parsing, and normalizing OpenStreet
 `par-osm-rust` is the data-source crate used by `osm-to-bedrock` and `osm-world`. It owns network and cache concerns only: Overpass/OSM fetching, optional Overture Maps fetching, source merge policy, OSM XML/PBF parsing, SRTM tile downloads, and HGT elevation lookup. It intentionally does **not** depend on Minecraft, WGPU, UI, renderer, or application-specific types.
 
 ```toml
-par-osm-rust = "0.2"
+par-osm-rust = "0.4"
 ```
 
 For local workspace development, use a path dependency instead:
@@ -23,7 +23,7 @@ par-osm-rust = { path = "../par-osm-rust" }
 Consumers that want only the pure subset (data model, parsing, writing, cache I/O, filter, synthetic IDs, elevation) without the blocking `reqwest` fetch surface can disable default features:
 
 ```toml
-par-osm-rust = { version = "0.2", default-features = false }
+par-osm-rust = { version = "0.4", default-features = false }
 ```
 
 ## Contents

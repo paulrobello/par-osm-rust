@@ -1,6 +1,6 @@
 # ENH-003 — POI Coverage Completion (`man_made` / `natural`)
 
-> Status: proposed · Effort: Low (hours) · Impact: stops discarding data the Overpass query already fetches
+> Status: done (0.4.0, 2026-07-19) · Effort: Low (hours) · Impact: stops discarding data the Overpass query already fetches
 > **Requires maintainer sign-off before implementation: downstream POI counts will change.**
 > Prerequisite: ARC-105 (single `POI_TAG_KEYS` constant) must be done first — this plan
 > extends that constant's mechanism. QA-102's unified parser makes the change single-site.

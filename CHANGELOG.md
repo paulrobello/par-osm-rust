@@ -9,6 +9,8 @@ Released versions are published to [crates.io](https://crates.io/crates/par-osm-
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-19
+
 ### Added
 
 - **Parallel SRTM tile downloads (ENH-001).** `srtm::download_tiles_for_bbox`
@@ -34,6 +36,31 @@ Released versions are published to [crates.io](https://crates.io/crates/par-osm-
   this closes the crate's largest test blind spot so future PBF-path changes
   (classification, relation ids, the duplicate-id policy) ship covered. Tests
   run under both `--all-features` and `--no-default-features`.
+
+### Changed
+
+- **`man_made` (tower/water_tower/chimney) and `natural` (peak/rock/spring)
+  standalone nodes are now classified as POIs (ENH-003).** The XML and PBF
+  parsers route these nodes into `OsmData::poi_nodes` with their tags retained,
+  instead of dropping them into the plain `nodes` map. This aligns the
+  classification layer with the Overpass query, which already fetches these
+  nodes as always-included POIs. **`poi_nodes` counts grow for datasets that
+  contain such nodes** — downstream consumers that assert exact POI counts
+  should update them. `natural=tree` is unchanged (still routed to
+  `tree_nodes`); other `man_made`/`natural` values (e.g. `man_made=pier`,
+  `natural=water`) remain non-POIs. Classification is now driven by a single
+  value-aware `osm::model::POI_TAG_RULES` table shared by both parsers and the
+  dedupe helper `sources::poi_category` (the flat `POI_TAG_KEYS` constant is
+  retired).
+
+This release bundles three enhancements shipped since 0.3.1. **ENH-001**
+(parallel SRTM tile downloads) is a wall-clock performance improvement with the
+public API unchanged; **ENH-002** (PBF test coverage) adds test infrastructure
+with no behavior change; **ENH-003** is the sole behavior change — standalone
+`man_made`/`natural` POI nodes now land in `poi_nodes` instead of the plain
+`nodes` map, so `poi_nodes` counts grow where such nodes are present. No API
+breaks across any of the three; consumers on 0.3.x can bump with no code
+changes.
 
 ## [0.3.1] - 2026-07-19
 
@@ -421,7 +448,8 @@ OSM XML/PBF parsing, normalized `OsmData` interchange, SRTM tile download, HGT
 elevation sampling, atomic write-then-rename cache discipline, and the
 `sources::fetch_map_data` orchestration entry point.
 
-[Unreleased]: https://github.com/paulrobello/par-osm-rust/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/paulrobello/par-osm-rust/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/paulrobello/par-osm-rust/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/paulrobello/par-osm-rust/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/paulrobello/par-osm-rust/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/paulrobello/par-osm-rust/compare/v0.2.0...v0.2.1
