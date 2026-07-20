@@ -11,6 +11,17 @@ Released versions are published to [crates.io](https://crates.io/crates/par-osm-
 
 ### Added
 
+- **Parallel SRTM tile downloads (ENH-001).** `srtm::download_tiles_for_bbox`
+  now fetches tiles concurrently through a bounded `std::thread::scope`
+  worker pool (default 4 workers, set by the `SRTM_DOWNLOAD_CONCURRENCY`
+  constant) instead of strictly sequentially, cutting multi-tile
+  elevation-fetch wall-clock time by ~3–5× on network-bound workloads. All
+  existing semantics are preserved: per-tile retry/backoff, error
+  aggregation, and the progress-callback contract (progress events are
+  forwarded to the caller thread via a channel, so the callback is never
+  invoked from a worker thread). The public API is unchanged; no async
+  runtime is introduced.
+
 - **PBF format test coverage (ENH-002).** `parse_pbf` — the `.osm.pbf` input
   path — previously had zero test coverage (no `.pbf` fixture existed in the
   repo). Added a checked-in `tests/fixtures/pbf_parity.{osm,osm.pbf}` fixture

@@ -1,6 +1,6 @@
 # ENH-001 — Parallel SRTM Tile Downloads
 
-> Status: proposed · Effort: Medium (~1 day) · Impact: 3–5× faster multi-tile elevation fetches
+> Status: done (commit `df2eed9`, 2026-07-19) · Effort: Medium (~1 day) · Impact: 3–5× faster multi-tile elevation fetches
 > Prerequisite: apply AUDIT Phase 1 fixes to `src/srtm.rs` first (SEC-101, SEC-102, SEC-108) —
 > they rewrite `download_tile` internals and add bbox validation this plan builds on.
 
