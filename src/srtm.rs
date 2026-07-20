@@ -26,6 +26,10 @@ const BASE_URL: &str = "https://s3.amazonaws.com/elevation-tiles-prod/skadi";
 /// audit's recommendation.
 pub const MAX_SRTM_TILES: usize = 1000;
 
+/// Number of concurrent SRTM tile downloads. Bounded to stay polite to the
+/// public tile bucket; raise cautiously.
+const SRTM_DOWNLOAD_CONCURRENCY: usize = 4;
+
 // ── Cache directory ─────────────────────────────────────────────────────────
 
 /// Return the persistent SRTM tile cache directory, creating it if needed.
@@ -313,7 +317,13 @@ fn download_tile_with_retry(lat: i32, lon: i32, dest_dir: &Path, max_retries: u3
 /// into the message string. The fraction is monotonic (clamped + guarded by
 /// the shared `emit_progress` helper).
 ///
-/// Each tile is retried up to 3 times with exponential backoff (1 s, 2 s).
+/// **Parallel downloads (ENH-001)**: Tiles download concurrently up to
+/// [`SRTM_DOWNLOAD_CONCURRENCY`] at a time. Progress callbacks may arrive
+/// out of sequential tile order (the `tile_index` argument still identifies
+/// which tile started). Each tile is retried up to 3 times with exponential
+/// backoff (1 s, 2 s); retry backoff applies per tile and overlaps other
+/// tiles' downloads.
+///
 /// If any tile fails all retries the function returns an error — the caller
 /// should abort the conversion rather than silently produce flat terrain.
 ///
@@ -329,6 +339,9 @@ pub fn download_tiles_for_bbox(
     dest_dir: &Path,
     progress_cb: crate::ProgressFn<'_>,
 ) -> Result<usize> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc;
+
     let tiles = tiles_for_bbox(bbox)?;
     let total = tiles.len();
 
@@ -339,39 +352,75 @@ pub fn download_tiles_for_bbox(
 
     log::info!("Downloading {total} SRTM tile(s) for bounding box");
 
-    let mut downloaded = 0usize;
-    let mut failed: Vec<String> = Vec::new();
-    let mut last_progress = 0.0f32;
+    // Channel events from worker threads back to the caller thread.
+    // The callback must stay on the caller thread — it is not `Sync`.
+    enum TileEvent {
+        Started(usize, String),
+        Done(String, Result<bool>),
+    }
 
-    for (i, (lat, lon)) in tiles.iter().enumerate() {
-        let name = tile_name(*lat, *lon);
-        // ARC-108: map raw counts to the shared ProgressFn contract.
-        let fraction = i as f32 / total as f32;
-        let message = format!("SRTM tile {name} ({}/{total})", i + 1);
-        crate::emit_progress(progress_cb, &mut last_progress, fraction, &message);
-        match download_tile_with_retry(*lat, *lon, dest_dir, 3) {
-            Ok(true) => downloaded += 1,
-            Ok(false) => {}
-            Err(e) => {
-                log::error!("Elevation tile {name} could not be downloaded: {e:#}");
-                failed.push(name);
+    let next = AtomicUsize::new(0);
+    let (tx, rx) = mpsc::channel::<TileEvent>();
+    let workers = SRTM_DOWNLOAD_CONCURRENCY.min(total).max(1);
+
+    std::thread::scope(|s| {
+        // Spawn worker threads that pull tiles from the shared index.
+        for _ in 0..workers {
+            let tx = tx.clone();
+            let tiles = &tiles;
+            let next = &next;
+            s.spawn(move || {
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    let Some((lat, lon)) = tiles.get(i).copied() else {
+                        break;
+                    };
+                    let name = tile_name(lat, lon);
+                    let _ = tx.send(TileEvent::Started(i, name.clone()));
+                    let res = download_tile_with_retry(lat, lon, dest_dir, 3);
+                    let _ = tx.send(TileEvent::Done(name, res));
+                }
+            });
+        }
+        drop(tx); // Drop the scope's sender — rx ends when all workers finish
+
+        // Drain events on the caller thread: this is where progress_cb is invoked.
+        let mut downloaded = 0usize;
+        let mut failed: Vec<String> = Vec::new();
+        let mut last_progress = 0.0f32;
+
+        for ev in rx {
+            match ev {
+                TileEvent::Started(i, name) => {
+                    let fraction = i as f32 / total as f32;
+                    let message = format!("SRTM tile {name} ({}/{total})", i + 1);
+                    crate::emit_progress(progress_cb, &mut last_progress, fraction, &message);
+                }
+                TileEvent::Done(_name, Ok(true)) => {
+                    downloaded += 1;
+                }
+                TileEvent::Done(_name, Ok(false)) => {}
+                TileEvent::Done(name, Err(e)) => {
+                    log::error!("Elevation tile {name} could not be downloaded: {e:#}");
+                    failed.push(name);
+                }
             }
         }
-    }
 
-    if !failed.is_empty() {
-        anyhow::bail!(
-            "Failed to download {} elevation tile(s): {}. \
-             Cannot generate terrain without complete elevation data.",
-            failed.len(),
-            failed.join(", ")
-        );
-    }
+        if !failed.is_empty() {
+            anyhow::bail!(
+                "Failed to download {} elevation tile(s): {}. \
+                 Cannot generate terrain without complete elevation data.",
+                failed.len(),
+                failed.join(", ")
+            );
+        }
 
-    // ARC-108: pin progress to 1.0 on success so callers observe completion.
-    crate::emit_progress(progress_cb, &mut last_progress, 1.0, "SRTM tiles ready");
-    log::info!("Elevation tiles ready ({downloaded} new, {total} total)");
-    Ok(downloaded)
+        // ARC-108: pin progress to 1.0 on success so callers observe completion.
+        crate::emit_progress(progress_cb, &mut last_progress, 1.0, "SRTM tiles ready");
+        log::info!("Elevation tiles ready ({downloaded} new, {total} total)");
+        Ok(downloaded)
+    })
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -563,5 +612,71 @@ mod tests {
         let gz = gzip(&payload);
         let out = decode_hgt_gz(&gz).expect("legal SRTM1 size accepted");
         assert_eq!(out.len(), SRTM1_HGT_BYTES);
+    }
+
+    // ── ENH-001: parallel download orchestration ────────────────────────────
+
+    #[test]
+    fn download_tiles_for_bbox_all_cached() {
+        // Test the concurrent path without network calls: pre-create all tiles
+        // as empty `.hgt` files and verify the function returns Ok(0), invokes
+        // the callback once per tile, and leaves files untouched.
+        use std::fs::File;
+        use std::io::Write;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dest_dir = temp.path();
+
+        // Create a 2×2 bbox (4 tiles)
+        let bbox = BBox::from((47.5, -123.5, 48.5, -122.5));
+        let tiles = tiles_for_bbox(&bbox).expect("valid bbox");
+        assert_eq!(tiles.len(), 4);
+
+        // Pre-create empty `.hgt` files for all tiles
+        for (lat, lon) in &tiles {
+            let name = tile_name(*lat, *lon);
+            let hgt_path = dest_dir.join(format!("{name}.hgt"));
+            let mut file = File::create(&hgt_path).expect("create file");
+            file.write_all(&[]).expect("write empty");
+        }
+
+        // Track callback invocations
+        let mut callback_count = 0usize;
+        let mut callback_total = 0usize;
+        let mut progress_cb = |fraction: f32, message: &str| {
+            callback_count += 1;
+            // Extract total from message format "SRTM tile N48W123 (1/4)"
+            if message.contains('/')
+                && let Some(rest) = message.rsplit('(').next()
+                && let Some(total_str) = rest.trim_end_matches(')').rsplit('/').next()
+            {
+                callback_total = total_str.parse().unwrap_or(0);
+            }
+            assert!((0.0..=1.0).contains(&fraction));
+            assert!(message.starts_with("SRTM tile") || message.contains("ready"));
+        };
+
+        // Download should return Ok(0) (all cached) and invoke callback 5 times
+        // (4 Started + 1 final "SRTM tiles ready")
+        let result = download_tiles_for_bbox(&bbox, dest_dir, &mut progress_cb);
+        assert!(
+            result.is_ok(),
+            "cached download should succeed: {:?}",
+            result
+        );
+        assert_eq!(result.unwrap(), 0, "no new downloads should occur");
+        assert_eq!(
+            callback_count, 5,
+            "callback should fire 5 times (4 started + 1 done)"
+        );
+        assert_eq!(callback_total, 4, "callback should report total=4");
+
+        // Verify files remain untouched (empty, not corrupted)
+        for (lat, lon) in &tiles {
+            let name = tile_name(*lat, *lon);
+            let hgt_path = dest_dir.join(format!("{name}.hgt"));
+            let metadata = std::fs::metadata(&hgt_path).expect("metadata");
+            assert_eq!(metadata.len(), 0, "file should remain empty");
+        }
     }
 }
