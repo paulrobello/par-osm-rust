@@ -24,7 +24,7 @@
 | # | ID | Title | Impact | Effort | Status |
 | --- | ---- | ------- | -------- | -------- | -------- |
 | 1 | ENH-001 | Parallel SRTM tile downloads | High (wall-clock) | Medium | [x] — done 2026-07-19, commit TBD |
-| 2 | ENH-002 | PBF test fixture + format coverage | High (coverage) | Low-Medium | [ ] |
+| 2 | ENH-002 | PBF test fixture + format coverage | High (coverage) | Low-Medium | [x] — done 2026-07-19 |
 | 3 | ENH-003 | POI coverage completion (`man_made`/`natural`) | Medium (data value) | Low | [ ] |
 | 4 | ENH-004 | Streaming Overpass fetch→parse pipeline | High (memory) | Medium | [ ] |
 | 5 | ENH-005 | Table-driven `map_tags_for_theme` | Medium (maintainability) | Low-Medium | [ ] |

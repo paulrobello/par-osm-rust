@@ -12,10 +12,11 @@
 //! together through the public surface a downstream consumer uses.
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use par_osm_rust::osm::{
     FeatureSource, OsmData, OsmNode, OsmPoiNode, OsmRelation, OsmWay, RelationMember,
-    parse_osm_xml_str, write_osm_xml_string,
+    parse_osm_file, parse_osm_xml_str, parse_pbf, write_osm_xml_string,
 };
 use par_osm_rust::sources::{PoiSourceMode, SourceStatus, merge_source_data};
 
@@ -575,4 +576,211 @@ fn merge_combines_ways_and_relations_from_both_sources() {
 
     // Bounds unioned across the two sources.
     assert_eq!(merged.bounds(), Some((0.0, 0.0, 2.0, 2.0)));
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// ENH-002: PBF format coverage. `parse_pbf` is an entire public input format
+// that previously had zero test coverage — no `.pbf` fixture existed in the
+// repo. The checked-in `tests/fixtures/pbf_parity.{osm,osm.pbf}` twins describe
+// identical data, so the PBF parser's output can be pinned against the XML
+// parser's across every collection. These tests also exercise the
+// `parse_osm_file` dispatcher's `.osm.pbf` → `parse_pbf` branch, which was
+// otherwise untested.
+// ────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn parse_pbf_matches_parse_osm_xml_for_equivalent_fixture() {
+    // The .osm and .osm.pbf fixtures hold identical data; both parsers must
+    // produce the same OsmData across every collection.
+    let xml =
+        parse_osm_file(Path::new("tests/fixtures/pbf_parity.osm")).expect("XML fixture parses");
+    let pbf =
+        parse_osm_file(Path::new("tests/fixtures/pbf_parity.osm.pbf")).expect("PBF fixture parses");
+    xml.validate_invariants()
+        .expect("XML fixture satisfies the ways/ways_by_id invariant");
+    pbf.validate_invariants()
+        .expect("PBF fixture satisfies the ways/ways_by_id invariant");
+
+    // Collection counts agree across every collection.
+    assert_eq!(xml.nodes().len(), pbf.nodes().len(), "node count");
+    assert_eq!(xml.ways().len(), pbf.ways().len(), "way count");
+    assert_eq!(xml.poi_nodes().len(), pbf.poi_nodes().len(), "poi count");
+    assert_eq!(xml.addr_nodes().len(), pbf.addr_nodes().len(), "addr count");
+    assert_eq!(xml.tree_nodes().len(), pbf.tree_nodes().len(), "tree count");
+    assert_eq!(
+        xml.tagged_nodes().len(),
+        pbf.tagged_nodes().len(),
+        "tagged count"
+    );
+    assert_eq!(
+        xml.relations().len(),
+        pbf.relations().len(),
+        "relation count"
+    );
+
+    // Node map identical (id → (lat, lon)). OsmNode has no PartialEq, so
+    // compare lat/lon with a tolerance tighter than PBF's nano-degree (1e-9)
+    // encoding.
+    assert_eq!(xml.nodes().len(), 8, "fixture has 8 nodes");
+    for (id, exp) in xml.nodes() {
+        let got = pbf
+            .nodes()
+            .get(id)
+            .unwrap_or_else(|| panic!("node {id} present in XML but missing from PBF"));
+        assert!(
+            (got.lat - exp.lat).abs() < 1e-9,
+            "node {id} lat differs: xml={} pbf={}",
+            exp.lat,
+            got.lat
+        );
+        assert!(
+            (got.lon - exp.lon).abs() < 1e-9,
+            "node {id} lon differs: xml={} pbf={}",
+            exp.lon,
+            got.lon
+        );
+    }
+
+    // Ways: find each by id and compare tags + node_refs, robust to any
+    // stream-order difference between the XML and PBF readers.
+    for way_id in [10_i64, 20] {
+        let x = xml
+            .ways()
+            .iter()
+            .find(|w| w.id == way_id)
+            .unwrap_or_else(|| panic!("way {way_id} present in XML"));
+        let p = pbf
+            .ways()
+            .iter()
+            .find(|w| w.id == way_id)
+            .unwrap_or_else(|| panic!("way {way_id} present in PBF"));
+        assert_eq!(x.node_refs, p.node_refs, "way {way_id} node_refs");
+        assert_eq!(x.tags, p.tags, "way {way_id} tags");
+    }
+    // The closed building way preserves its first==last closing ref on both
+    // paths (osmium does not dedupe it).
+    let building = pbf
+        .ways()
+        .iter()
+        .find(|w| w.id == 20)
+        .expect("building way in PBF");
+    assert_eq!(building.node_refs.first(), building.node_refs.last());
+    assert_eq!(building.node_refs.len(), 4);
+
+    // The cafe POI: identical tag map on both sides, including the UTF-8 name
+    // ("Parity Café") — pins that PBF tag values round-trip as raw UTF-8.
+    let xml_cafe = xml
+        .poi_nodes()
+        .iter()
+        .find(|p| p.tags.get("amenity").map(String::as_str) == Some("cafe"))
+        .expect("cafe POI missing from XML");
+    let pbf_cafe = pbf
+        .poi_nodes()
+        .iter()
+        .find(|p| p.tags.get("amenity").map(String::as_str) == Some("cafe"))
+        .expect("cafe POI missing from PBF");
+    assert_eq!(xml_cafe.tags, pbf_cafe.tags, "cafe tag map");
+    assert_eq!(
+        pbf_cafe.tags.get("name").map(String::as_str),
+        Some("Parity Café"),
+        "UTF-8 tag value must round-trip through PBF"
+    );
+
+    // Bounds: the fixture's explicit <bounds> equals the node lat/lon extrema,
+    // so the XML parser (honors <bounds>) and the PBF parser (node-extrema
+    // only — it does not read a PBF header bbox) agree. The XML side parses the
+    // attribute via `f64::parse`; the PBF side decodes nano-degrees
+    // (`coord_nanos / 1e9`). Those two float pipelines differ by ~1 ULP, so
+    // compare componentwise with a tolerance tighter than PBF's 1e-9 precision
+    // rather than asserting exact equality.
+    let (xml_s, xml_w, xml_n, xml_e) = xml.bounds().expect("xml has bounds");
+    let (pbf_s, pbf_w, pbf_n, pbf_e) = pbf.bounds().expect("pbf has bounds");
+    for (axis, (x, p)) in [
+        ("south", (xml_s, pbf_s)),
+        ("west", (xml_w, pbf_w)),
+        ("north", (xml_n, pbf_n)),
+        ("east", (xml_e, pbf_e)),
+    ] {
+        assert!(
+            (x - p).abs() < 1e-9,
+            "bounds {axis} differs beyond 1e-9: xml={x} pbf={p}"
+        );
+    }
+    // PBF bounds land on the fixture's intended bbox within tolerance.
+    assert!((pbf_s - 51.500).abs() < 1e-9);
+    assert!((pbf_w - -0.100).abs() < 1e-9);
+    assert!((pbf_n - 51.515).abs() < 1e-9);
+    assert!((pbf_e - -0.090).abs() < 1e-9);
+
+    // Relation: id (ARC-113), tags, and member way_id/role all match.
+    assert_eq!(xml.relations().len(), 1, "fixture has 1 relation");
+    let xr = &xml.relations()[0];
+    let pr = &pbf.relations()[0];
+    assert_eq!(xr.id, pr.id, "relation id (ARC-113)");
+    assert_eq!(xr.id, 200, "relation id preserved through PBF");
+    assert_eq!(xr.tags, pr.tags, "relation tags");
+    assert_eq!(xr.members.len(), pr.members.len(), "relation member count");
+    assert_eq!(xr.members[0].way_id, pr.members[0].way_id, "member way_id");
+    assert_eq!(xr.members[0].role, pr.members[0].role, "member role");
+}
+
+#[test]
+fn parse_pbf_classifies_poi_address_tree_and_tagged_nodes() {
+    // Pin the PBF-side classification directly (not just via XML parity).
+    // ARC-105 will later consolidate the POI key list; this guards the PBF
+    // path against drift.
+    let pbf =
+        parse_osm_file(Path::new("tests/fixtures/pbf_parity.osm.pbf")).expect("PBF fixture parses");
+
+    // POI: amenity=cafe is in POI_TAG_KEYS.
+    assert_eq!(pbf.poi_nodes().len(), 1);
+    assert_eq!(
+        pbf.poi_nodes()[0].tags.get("amenity").map(String::as_str),
+        Some("cafe")
+    );
+    assert_eq!(pbf.poi_nodes()[0].source, FeatureSource::Osm);
+
+    // Address: addr:housenumber classifies into addr_nodes.
+    assert_eq!(pbf.addr_nodes().len(), 1);
+    assert_eq!(
+        pbf.addr_nodes()[0]
+            .tags
+            .get("addr:housenumber")
+            .map(String::as_str),
+        Some("42")
+    );
+
+    // Tree: natural=tree classifies into tree_nodes (lat/lon only, no tags).
+    assert_eq!(pbf.tree_nodes().len(), 1);
+
+    // ARC-004: every standalone tagged node lands in tagged_nodes — the
+    // lossless superset. The fixture has exactly three tagged nodes (POI +
+    // address + tree).
+    assert_eq!(pbf.tagged_nodes().len(), 3);
+}
+
+#[test]
+fn parse_pbf_returns_err_on_truncated_fixture() {
+    // A truncated PBF must surface an Err, not panic. parse_pbf reads via
+    // osmpbf's BufReader-backed ElementReader (not mmap), so a short blob
+    // returns an I/O error propagated through the `?` in parse_pbf.
+    use std::io::Write;
+    let full = std::fs::read("tests/fixtures/pbf_parity.osm.pbf").expect("fixture file exists");
+    assert!(
+        full.len() > 40,
+        "fixture must be larger than the truncation point"
+    );
+    let mut tmp = tempfile::Builder::new()
+        .suffix(".osm.pbf")
+        .tempfile()
+        .expect("tempfile creation");
+    tmp.write_all(&full[..40]).expect("write truncated fixture");
+    tmp.flush().expect("flush truncated fixture");
+    let (_, path) = tmp.into_parts();
+
+    let result = parse_pbf(&path);
+    assert!(
+        result.is_err(),
+        "truncated PBF must return Err, not Ok or a panic"
+    );
 }

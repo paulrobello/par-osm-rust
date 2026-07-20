@@ -9,6 +9,21 @@ Released versions are published to [crates.io](https://crates.io/crates/par-osm-
 
 ## [Unreleased]
 
+### Added
+
+- **PBF format test coverage (ENH-002).** `parse_pbf` — the `.osm.pbf` input
+  path — previously had zero test coverage (no `.pbf` fixture existed in the
+  repo). Added a checked-in `tests/fixtures/pbf_parity.{osm,osm.pbf}` fixture
+  pair (the PBF twin generated from the XML source via osmium-tool) plus three
+  integration tests in `tests/integration.rs`: an XML↔PBF parity test across
+  every `OsmData` collection (nodes, ways, POI/address/tree/tagged nodes,
+  relations, bounds), a PBF-side classification pin, and a truncated-input
+  error-path test. The parity test also exercises the `parse_osm_file`
+  dispatcher's `.osm.pbf` → `parse_pbf` branch. Library behavior is unchanged;
+  this closes the crate's largest test blind spot so future PBF-path changes
+  (classification, relation ids, the duplicate-id policy) ship covered. Tests
+  run under both `--all-features` and `--no-default-features`.
+
 ## [0.3.1] - 2026-07-19
 
 ### Added
