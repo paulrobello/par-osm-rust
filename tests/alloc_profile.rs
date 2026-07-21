@@ -135,9 +135,11 @@ fn measure_key_allocation_share() {
     let elapsed = start.elapsed();
     let (allocs, bytes, reallocs) = read_counters();
 
-    // Attribute tag-key cost exactly from the parsed result. Each tag's key is
-    // one `String` (one heap allocation) under the current `HashMap<String, _>`,
-    // so `n_tags` is the precise count of key allocations the parse performed.
+    // Walk the parsed result to count tags and distinct keys. At the pre-interning
+    // baseline each key was a fresh `String` allocation, so `n_tags` equaled the
+    // key-allocation count; after interning, only the ~8 distinct keys allocate.
+    // The apples-to-apples before/after signal is `total_ops` / `total_bytes`
+    // above, not the key-share line below (which is the gate metric, not a delta).
     let mut n_tags: u64 = 0;
     let mut key_bytes: u64 = 0;
     let mut distinct_keys: HashSet<&str> = HashSet::new();
@@ -146,7 +148,7 @@ fn measure_key_allocation_share() {
         for k in w.tags.keys() {
             n_tags += 1;
             key_bytes += k.len() as u64;
-            distinct_keys.insert(k.as_str());
+            distinct_keys.insert(&**k);
         }
     }
 

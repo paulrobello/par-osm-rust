@@ -29,8 +29,8 @@ fn data_with_pois(count: usize, source: FeatureSource) -> OsmData {
                 lat,
                 lon,
                 tags: HashMap::from([
-                    ("amenity".to_string(), "restaurant".to_string()),
-                    ("name".to_string(), format!("Place {i}")),
+                    ("amenity".into(), "restaurant".to_string()),
+                    ("name".into(), format!("Place {i}")),
                 ]),
                 source,
             }
@@ -54,8 +54,8 @@ fn data_with_overture_duplicates(count: usize) -> OsmData {
                 lat,
                 lon,
                 tags: HashMap::from([
-                    ("amenity".to_string(), "restaurant".to_string()),
-                    ("name".to_string(), format!("Place {i}")),
+                    ("amenity".into(), "restaurant".to_string()),
+                    ("name".into(), format!("Place {i}")),
                 ]),
                 source: FeatureSource::Overture,
             }

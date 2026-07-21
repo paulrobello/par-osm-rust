@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 use std::collections::HashMap;
 
-use crate::osm::{FeatureSource, OsmData, OsmNode, OsmPoiNode, OsmWay};
+use crate::osm::{FeatureSource, KeyInterner, OsmData, OsmNode, OsmPoiNode, OsmWay, TagMap};
 use crate::synthetic_ids::OvertureIdAllocator;
 
 use super::theme::{OvertureTheme, map_tags_for_theme};
@@ -110,7 +110,7 @@ fn push_way_from_coords(
     id_alloc: &mut OvertureIdAllocator,
     nodes: &mut HashMap<i64, OsmNode>,
     ways: &mut Vec<OsmWay>,
-    tags: HashMap<String, String>,
+    tags: TagMap,
     min_lat: &mut f64,
     min_lon: &mut f64,
     max_lat: &mut f64,
@@ -197,9 +197,13 @@ pub(crate) fn parse_overture_geojson_with_allocator(
     let mut max_lat = f64::MIN;
     let mut max_lon = f64::MIN;
 
+    // ENH-008: parse-scoped tag-key interner (one allocation per distinct key
+    // across the whole GeoJSON instead of one per tag occurrence).
+    let mut interner = KeyInterner::with_common();
+
     for feature in features {
         let props = feature.get("properties").unwrap_or(&Value::Null);
-        let tags = map_tags_for_theme(props, theme);
+        let tags = map_tags_for_theme(props, theme, &mut interner);
 
         let geometry = match feature.get("geometry") {
             Some(g) => g,

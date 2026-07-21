@@ -10,6 +10,107 @@
 //! data-flow.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+/// Interned OSM tag key. OSM tag keys come from a tiny hot vocabulary
+/// (`highway`, `building`, `name`, …) repeated millions of times in a large
+/// extract, so producers share one allocation per distinct key via a
+/// parse-scoped interner instead of allocating a fresh `String` per
+/// occurrence (ENH-008). `Arc<str>: Borrow<str>` keeps `map.get("name")` and
+/// `map["name"]` source-compatible with the prior `String`-keyed maps.
+pub type TagKey = Arc<str>;
+
+/// Tag map keyed by interned [`TagKey`]. Values stay `String` because tag
+/// values are largely unique (names, numbers) and are not worth interning.
+pub type TagMap = HashMap<TagKey, String>;
+
+/// The OSM tag keys that dominate real extracts, used to pre-seed each parse's
+/// [`KeyInterner`] so the hottest keys never pay a first-sight insert. Extended
+/// with every literal key the Overture theme mapper writes so both parse paths
+/// benefit. Pre-seeding is purely a first-occurrence optimization: any key not
+/// listed here is interned on first sight with identical semantics.
+pub(crate) const COMMON_TAG_KEYS: &[&str] = &[
+    "highway",
+    "building",
+    "name",
+    "amenity",
+    "natural",
+    "surface",
+    "shop",
+    "tourism",
+    "leisure",
+    "historic",
+    "landuse",
+    "waterway",
+    "water",
+    "addr:housenumber",
+    "addr:street",
+    "addr:city",
+    "addr:postcode",
+    "building:height",
+    "building:levels",
+    "bridge",
+    "tunnel",
+    "oneway",
+    "ref",
+    "maxspeed",
+    "lanes",
+    "lit",
+    "sidewalk",
+    "layer",
+    "man_made",
+    "ele",
+    "type",
+    "width",
+    "access",
+    "service",
+];
+
+/// Parse-scoped tag-key interner (ENH-008). One per parse, dropped with it;
+/// NOT global, so an interned key never outlives the dataset that owns it.
+///
+/// A `HashSet<TagKey>` suffices because `Arc<str>: Borrow<str>`, so
+/// [`intern`](Self::intern) does a single `&str` lookup with no wrapper type.
+pub(crate) struct KeyInterner(HashSet<TagKey>);
+
+impl KeyInterner {
+    /// New interner pre-seeded with [`COMMON_TAG_KEYS`].
+    pub(crate) fn with_common() -> Self {
+        let mut set = HashSet::with_capacity(COMMON_TAG_KEYS.len());
+        for k in COMMON_TAG_KEYS {
+            set.insert(Arc::from(*k));
+        }
+        Self(set)
+    }
+
+    /// Return the shared [`TagKey`] for `k`: bump the refcount on a repeat
+    /// sighting, or allocate and store one `Arc<str>` on first sight.
+    pub(crate) fn intern(&mut self, k: &str) -> TagKey {
+        if let Some(existing) = self.0.get(k) {
+            existing.clone()
+        } else {
+            let a: TagKey = Arc::from(k);
+            self.0.insert(a.clone());
+            a
+        }
+    }
+
+    /// Collect an iterator of `(&str, &str)` tag pairs into a [`TagMap`],
+    /// interning each key and allocating each value. Used by the PBF parser,
+    /// whose `osmpbf` tag iterator yields borrowed `(&str, &str)` pairs; doing
+    /// this as a method (rather than a closure capturing `&mut self`) keeps the
+    /// `for_each` body free of nested mutable borrows.
+    pub(crate) fn intern_tag_pairs<'a, I>(&mut self, pairs: I) -> TagMap
+    where
+        I: IntoIterator<Item = (&'a str, &'a str)>,
+    {
+        let mut m = TagMap::new();
+        for (k, v) in pairs {
+            m.insert(self.intern(k), v.to_string());
+        }
+        m
+    }
+}
 
 /// One POI-classification rule: a tag key and, optionally, the only values of
 /// that key that qualify. `None` means any value of the key marks a POI (the
@@ -71,7 +172,7 @@ pub(crate) const POI_TAG_RULES: &[PoiTagRule] = &[
 /// The XML parser ([`super::xml_parse`]) and the PBF parser ([`super::pbf`])
 /// both call this to decide `OsmData::poi_nodes` membership, keeping the two
 /// paths identical (ARC-105 single-source invariant, extended by ENH-003).
-pub(crate) fn is_poi(tags: &HashMap<String, String>) -> bool {
+pub(crate) fn is_poi(tags: &TagMap) -> bool {
     POI_TAG_RULES.iter().any(|rule| {
         tags.get(rule.key)
             .is_some_and(|v| rule.values.is_none_or(|vals| vals.contains(&v.as_str())))
@@ -112,7 +213,7 @@ pub struct OsmPoiNode {
     /// Longitude in decimal degrees (WGS-84).
     pub lon: f64,
     /// Free-form OSM tags on the node (`amenity`, `shop`, `name`, …).
-    pub tags: HashMap<String, String>,
+    pub tags: TagMap,
     /// Provenance of this POI — OSM, Overture, or synthetic.
     pub source: FeatureSource,
 }
@@ -128,7 +229,7 @@ pub struct OsmWay {
     /// The way's own OSM identifier (the single source of truth; QA-021).
     pub id: i64,
     /// Free-form OSM tags on the way (`highway`, `building`, `name`, …).
-    pub tags: HashMap<String, String>,
+    pub tags: TagMap,
     /// Ordered list of OSM node IDs referenced by the way. Positions are
     /// resolved against the parent [`OsmData`] node map by consumers
     /// (parser, writer, clip), not at parse time.
@@ -155,7 +256,7 @@ pub struct OsmRelation {
     pub id: i64,
     /// Free-form OSM tags on the relation (must include `type=multipolygon`
     /// for the parser to retain it).
-    pub tags: HashMap<String, String>,
+    pub tags: TagMap,
     /// Ways belonging to the relation, each with its role.
     pub members: Vec<RelationMember>,
 }
@@ -692,11 +793,11 @@ impl OsmData {
 mod tests {
     use super::*;
 
-    /// Build a `HashMap<String, String>` from `&str` pairs.
-    fn tags(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+    /// Build a [`TagMap`] from `&str` pairs (interning each key).
+    fn tags(pairs: &[(&str, &str)]) -> TagMap {
         pairs
             .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .map(|(k, v)| (Arc::from(*k), v.to_string()))
             .collect()
     }
 

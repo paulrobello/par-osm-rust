@@ -20,7 +20,7 @@ use crate::ProgressFn;
 #[cfg(feature = "blocking")]
 use crate::bbox::BBox;
 use crate::filter::FeatureFilter;
-use crate::osm::{FeatureSource, OsmData, OsmPoiNode, POI_TAG_RULES};
+use crate::osm::{FeatureSource, OsmData, OsmPoiNode, POI_TAG_RULES, TagMap};
 use crate::overture::OvertureParams;
 
 /// Policy for which POI source should appear in the normalized output.
@@ -136,7 +136,7 @@ pub struct SourceFetchResult {
 /// previous allocating helper produced. A missing or whitespace-only name yields
 /// `None`, matching the original semantics so a POI with `name = "   "` is
 /// treated the same as a POI with no name tag at all.
-fn name_raw(tags: &HashMap<String, String>) -> Option<&str> {
+fn name_raw(tags: &TagMap) -> Option<&str> {
     tags.get("name")
         .map(String::as_str)
         .filter(|name| !name.trim().is_empty())
@@ -157,7 +157,7 @@ fn name_raw(tags: &HashMap<String, String>) -> Option<&str> {
 /// sees) is safe. Two POIs whose tags both miss every rule key
 /// both return `None` and therefore compare equal — matching the original
 /// `"unknown" == "unknown"` behaviour without allocating the sentinel string.
-fn poi_category(tags: &HashMap<String, String>) -> Option<(&'static str, &str)> {
+fn poi_category(tags: &TagMap) -> Option<(&'static str, &str)> {
     for rule in POI_TAG_RULES {
         if let Some(value) = tags.get(rule.key) {
             return Some((rule.key, value.as_str()));
@@ -296,8 +296,8 @@ fn dedupe_pois_with_overture_preference(mut pois: Vec<OsmPoiNode>) -> Vec<OsmPoi
 ///     lat: 51.5,
 ///     lon: -0.1,
 ///     tags: HashMap::from([
-///         ("amenity".to_string(), "restaurant".to_string()),
-///         ("name".to_string(), "Diner".to_string()),
+///         ("amenity".into(), "restaurant".to_string()),
+///         ("name".into(), "Diner".to_string()),
 ///     ]),
 ///     source: FeatureSource::Osm,
 /// }]);
@@ -599,9 +599,9 @@ mod tests {
         name: &str,
         source: FeatureSource,
     ) -> OsmPoiNode {
-        let mut tags = HashMap::from([(key.to_string(), value.to_string())]);
+        let mut tags = HashMap::from([(key.into(), value.to_string())]);
         if !name.is_empty() {
-            tags.insert("name".to_string(), name.to_string());
+            tags.insert("name".into(), name.to_string());
         }
         OsmPoiNode {
             lat,
@@ -1279,21 +1279,21 @@ mod tests {
         // `natural=peak` is the load-bearing case — before this task the loop
         // only chained `man_made`, so a `natural=peak` POI returned `None` and
         // could spuriously dedupe against any other uncategorized POI.
-        let amenity = HashMap::from([("amenity".to_string(), "cafe".to_string())]);
+        let amenity = HashMap::from([("amenity".into(), "cafe".to_string())]);
         assert_eq!(
             poi_category(&amenity),
             Some(("amenity", "cafe")),
             "legacy amenity key still recognized"
         );
 
-        let tower = HashMap::from([("man_made".to_string(), "tower".to_string())]);
+        let tower = HashMap::from([("man_made".into(), "tower".to_string())]);
         assert_eq!(
             poi_category(&tower),
             Some(("man_made", "tower")),
             "man_made=tower is a recognized category"
         );
 
-        let peak = HashMap::from([("natural".to_string(), "peak".to_string())]);
+        let peak = HashMap::from([("natural".into(), "peak".to_string())]);
         assert_eq!(
             poi_category(&peak),
             Some(("natural", "peak")),
@@ -1302,7 +1302,7 @@ mod tests {
 
         // A POI whose only tag is on no rule key has no category and returns
         // None — `poi_duplicates` then falls back to distance-only dedupe.
-        let highway = HashMap::from([("highway".to_string(), "residential".to_string())]);
+        let highway = HashMap::from([("highway".into(), "residential".to_string())]);
         assert!(
             poi_category(&highway).is_none(),
             "highway=residential is not a POI category"

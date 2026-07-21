@@ -5,7 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+
+use crate::osm::{KeyInterner, TagMap};
 
 /// Overture Maps theme selector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -234,7 +235,7 @@ const ADDRESS_RULES: &[Rule] = &[
 /// to the prior inline mapping code: missing sources are omitted unless a
 /// default is set, f64/u64 use their `Display` form, and `Flag` only fires on
 /// an explicit `true`.
-fn apply_rules(props: &Value, rules: &[Rule], tags: &mut HashMap<String, String>) {
+fn apply_rules(props: &Value, rules: &[Rule], tags: &mut TagMap, interner: &mut KeyInterner) {
     for rule in rules {
         match *rule {
             Rule::Str { src, dst, default } => {
@@ -244,27 +245,27 @@ fn apply_rules(props: &Value, rules: &[Rule], tags: &mut HashMap<String, String>
                     (None, None) => None,
                 };
                 if let Some(v) = value {
-                    tags.insert(dst.into(), v);
+                    tags.insert(interner.intern(dst), v);
                 }
             }
             Rule::F64 { src, dst } => {
                 if let Some(n) = props.get(src).and_then(|v| v.as_f64()) {
-                    tags.insert(dst.into(), n.to_string());
+                    tags.insert(interner.intern(dst), n.to_string());
                 }
             }
             Rule::U64 { src, dst } => {
                 if let Some(n) = props.get(src).and_then(|v| v.as_u64()) {
-                    tags.insert(dst.into(), n.to_string());
+                    tags.insert(interner.intern(dst), n.to_string());
                 }
             }
             Rule::Flag { src, dst, val } => {
                 if props.get(src).and_then(|v| v.as_bool()).unwrap_or(false) {
-                    tags.insert(dst.into(), val.into());
+                    tags.insert(interner.intern(dst), val.into());
                 }
             }
             Rule::Nested2 { a, b, dst } => {
                 if let Some(s) = props.get(a).and_then(|v| v.get(b)).and_then(|v| v.as_str()) {
-                    tags.insert(dst.into(), s.to_string());
+                    tags.insert(interner.intern(dst), s.to_string());
                 }
             }
         }
@@ -280,20 +281,20 @@ fn apply_rules(props: &Value, rules: &[Rule], tags: &mut HashMap<String, String>
 /// table would obscure the irregularity, so the `matches!` chain is preserved
 /// here verbatim. Extracting it drops `map_tags_for_theme`'s complexity below
 /// 10 while leaving this function the single owner of Base semantics.
-fn map_base_tags(subtype: &str, class: &str, tags: &mut HashMap<String, String>) {
+fn map_base_tags(subtype: &str, class: &str, tags: &mut TagMap, interner: &mut KeyInterner) {
     // Water bodies
     if matches!(
         subtype,
         "water" | "lake" | "pond" | "reservoir" | "ocean" | "sea"
     ) {
-        tags.insert("natural".into(), "water".into());
+        tags.insert(interner.intern("natural"), "water".into());
         if !subtype.is_empty() && subtype != "water" {
-            tags.insert("water".into(), subtype.to_string());
+            tags.insert(interner.intern("water"), subtype.to_string());
         }
     }
     // Waterways
     else if matches!(subtype, "river" | "stream" | "canal" | "drain" | "ditch") {
-        tags.insert("waterway".into(), subtype.to_string());
+        tags.insert(interner.intern("waterway"), subtype.to_string());
     }
     // Land use — from class when subtype indicates land_use
     else if matches!(
@@ -308,7 +309,7 @@ fn map_base_tags(subtype: &str, class: &str, tags: &mut HashMap<String, String>)
             | "scrub"
             | "farmyard"
     ) {
-        tags.insert("landuse".into(), subtype.to_string());
+        tags.insert(interner.intern("landuse"), subtype.to_string());
     }
     // Natural land cover from class
     else if matches!(subtype, "land" | "")
@@ -317,19 +318,19 @@ fn map_base_tags(subtype: &str, class: &str, tags: &mut HashMap<String, String>)
             "grass" | "scrub" | "heath" | "bare_rock" | "sand" | "beach"
         )
     {
-        tags.insert("natural".into(), class.to_string());
+        tags.insert(interner.intern("natural"), class.to_string());
     }
     // Leisure areas
     else if matches!(subtype, "park" | "garden" | "pitch" | "playground") {
-        tags.insert("leisure".into(), subtype.to_string());
+        tags.insert(interner.intern("leisure"), subtype.to_string());
     }
     // Individual tree points
     else if subtype == "tree" {
-        tags.insert("natural".into(), "tree".into());
+        tags.insert(interner.intern("natural"), "tree".into());
     }
     // Fallback: try the class field
     else if !class.is_empty() {
-        tags.insert("landuse".into(), class.to_string());
+        tags.insert(interner.intern("landuse"), class.to_string());
     }
 }
 
@@ -341,14 +342,20 @@ fn map_base_tags(subtype: &str, class: &str, tags: &mut HashMap<String, String>)
 /// Place additionally runs its bespoke `categories.primary` →
 /// [`map_place_category_to_osm_key`] block, which is a one-off key derivation
 /// not worth a rule variant.
-pub(super) fn map_tags_for_theme(props: &Value, theme: OvertureTheme) -> HashMap<String, String> {
-    let mut tags: HashMap<String, String> = HashMap::new();
+pub(super) fn map_tags_for_theme(
+    props: &Value,
+    theme: OvertureTheme,
+    interner: &mut KeyInterner,
+) -> TagMap {
+    let mut tags: TagMap = TagMap::new();
 
     match theme {
-        OvertureTheme::Building => apply_rules(props, BUILDING_RULES, &mut tags),
-        OvertureTheme::Transportation => apply_rules(props, TRANSPORTATION_RULES, &mut tags),
+        OvertureTheme::Building => apply_rules(props, BUILDING_RULES, &mut tags, interner),
+        OvertureTheme::Transportation => {
+            apply_rules(props, TRANSPORTATION_RULES, &mut tags, interner)
+        }
         OvertureTheme::Place => {
-            apply_rules(props, PLACE_RULES, &mut tags);
+            apply_rules(props, PLACE_RULES, &mut tags, interner);
             // categories.primary → amenity / shop / tourism / leisure
             if let Some(category) = props
                 .get("categories")
@@ -356,15 +363,15 @@ pub(super) fn map_tags_for_theme(props: &Value, theme: OvertureTheme) -> HashMap
                 .and_then(|v| v.as_str())
             {
                 let osm_key = map_place_category_to_osm_key(category);
-                tags.insert(osm_key.into(), category.to_string());
+                tags.insert(interner.intern(osm_key), category.to_string());
             }
         }
         OvertureTheme::Base => {
             let subtype = props.get("subtype").and_then(|v| v.as_str()).unwrap_or("");
             let class = props.get("class").and_then(|v| v.as_str()).unwrap_or("");
-            map_base_tags(subtype, class, &mut tags);
+            map_base_tags(subtype, class, &mut tags, interner);
         }
-        OvertureTheme::Address => apply_rules(props, ADDRESS_RULES, &mut tags),
+        OvertureTheme::Address => apply_rules(props, ADDRESS_RULES, &mut tags, interner),
     }
 
     tags

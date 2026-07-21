@@ -25,24 +25,4 @@
 
 | # | ID | Title | Impact | Effort | Status |
 | --- | ---- | ------- | -------- | -------- | -------- |
-| 1 | ENH-008 | Tag-storage allocation reduction (key interning) | Medium (perf/memory) | High | [ ] |
-
----
-
-## ENH-008 — Tag-storage allocation reduction (key interning)
-
-Every parsed element allocates owned `String`s for tag keys, yet OSM tag keys are
-drawn from a tiny hot vocabulary (`highway`, `building`, `name`, `amenity`, …
-repeated millions of times in a large extract). Switching tag maps from
-`HashMap<String, String>` to `HashMap<Arc<str>, String>` with a parse-time interner
-(pre-seeded with the ~50 most common keys, falling back to on-the-fly interning)
-eliminates one allocation per tag for hot keys and shrinks resident memory for large
-datasets. This changes the public type of every `tags` field, so it is 0.5.0-class —
-ENH-007 shipped in 0.3.0 (the crate is now at 0.4.0), so this sequences into the next
-breaking release. Benchmarks must gate it: the win is real for planet-scale extracts
-but must be proven non-regressive for small ones.
-
-**Expected impact**: measurable allocation/memory reduction on large extracts (to be
-quantified by the ENH-006 bench harness first). **Effort**: High — touches every
-producer/consumer of tags. **Depends on**: ENH-007 (✓ shipped in 0.3.0), ideally
-ENH-006 (bench gate). **Plan**: `docs/fable/ENH-008-tag-key-interning.md`
+| — | — | _(none currently open — shipped items move to `CHANGELOG.md` [Unreleased])_ | — | — | — |

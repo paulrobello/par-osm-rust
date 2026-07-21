@@ -20,7 +20,8 @@ use quick_xml::events::Event;
 use quick_xml::events::attributes::Attribute;
 
 use super::model::{
-    FeatureSource, OsmData, OsmNode, OsmPoiNode, OsmRelation, OsmWay, RelationMember, is_poi,
+    FeatureSource, KeyInterner, OsmData, OsmNode, OsmPoiNode, OsmRelation, OsmWay, RelationMember,
+    TagKey, TagMap, is_poi,
 };
 use super::pbf::parse_pbf;
 
@@ -87,17 +88,33 @@ fn parse_node_attrs(e: &BytesStart<'_>) -> Option<(i64, f64, f64)> {
 /// Read the `k`/`v` attributes from a `<tag>` element. Returns `None` when
 /// `k` is missing or empty, matching the parser's long-standing skip
 /// behavior for tags without a key.
-fn parse_tag_attrs(e: &BytesStart<'_>) -> Option<(String, String)> {
-    let mut k = String::new();
-    let mut v = String::new();
+fn parse_tag_attrs(e: &BytesStart<'_>, interner: &mut KeyInterner) -> Option<(TagKey, String)> {
+    let mut key: Option<TagKey> = None;
+    let mut value = String::new();
     for attr in e.attributes().flatten() {
         match attr.key.as_ref() {
-            b"k" => k = xml_attr_value(&attr),
-            b"v" => v = xml_attr_value(&attr),
+            b"k" => key = Some(intern_attr_value(&attr, interner)),
+            b"v" => value = xml_attr_value(&attr),
             _ => {}
         }
     }
-    if k.is_empty() { None } else { Some((k, v)) }
+    match key {
+        // An absent or empty `k` is not a usable tag — match the prior
+        // `if k.is_empty() { None }` behaviour exactly.
+        Some(k) if !k.is_empty() => Some((k, value)),
+        _ => None,
+    }
+}
+
+/// Intern an attribute's normalized value, borrowing straight from the event
+/// buffer when no entity-normalization forced an owned copy. OSM tag keys are
+/// plain identifiers (`addr:housenumber`, `building:levels`, …), so the hot
+/// keys reach the interner without ever becoming an owned `String` (ENH-008).
+fn intern_attr_value(attr: &Attribute<'_>, interner: &mut KeyInterner) -> TagKey {
+    match attr.normalized_value(XmlVersion::Implicit1_0) {
+        Ok(cow) => interner.intern(&cow),
+        Err(_) => interner.intern(std::str::from_utf8(attr.value.as_ref()).unwrap_or("")),
+    }
 }
 
 /// Read the `ref` attribute from an `<nd>` element. Returns `None` if
@@ -270,14 +287,17 @@ fn parse_osm_events<R: std::io::BufRead>(mut reader: Reader<R>) -> Result<OsmDat
     let mut in_node = false;
     let mut cur_lat = 0.0f64;
     let mut cur_lon = 0.0f64;
-    let mut cur_node_tags: HashMap<String, String> = HashMap::new();
+    // ENH-008: parse-scoped tag-key interner. One allocation per distinct key
+    // across the whole document instead of one per tag occurrence.
+    let mut interner = KeyInterner::with_common();
+    let mut cur_node_tags: TagMap = TagMap::new();
 
     let mut in_way = false;
     // QA-101: `Option<i64>` so a missing/unparseable way id is detected at the
     // way End event and the way skipped, rather than defaulted to 0 (which
     // collided two id-less ways and tripped the `OsmData::new` invariant).
     let mut current_way_id: Option<i64> = None;
-    let mut current_tags: HashMap<String, String> = HashMap::new();
+    let mut current_tags: TagMap = TagMap::new();
     let mut current_node_refs: Vec<i64> = Vec::new();
     // QA-101: first-wins duplicate guard, lives across the whole parse so two
     // `<way id="N">` elements in the same document do not both end up in the
@@ -384,7 +404,7 @@ fn parse_osm_events<R: std::io::BufRead>(mut reader: Reader<R>) -> Result<OsmDat
                     }
                 }
                 b"tag" if in_node || in_way || in_relation => {
-                    if let Some((k, v)) = parse_tag_attrs(e) {
+                    if let Some((k, v)) = parse_tag_attrs(e, &mut interner) {
                         if in_node {
                             cur_node_tags.insert(k, v);
                         } else {

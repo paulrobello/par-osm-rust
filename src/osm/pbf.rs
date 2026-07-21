@@ -11,7 +11,8 @@ use anyhow::{Context, Result};
 use osmpbf::{Element, ElementReader};
 
 use super::model::{
-    FeatureSource, OsmData, OsmNode, OsmPoiNode, OsmRelation, OsmWay, RelationMember, is_poi,
+    FeatureSource, KeyInterner, OsmData, OsmNode, OsmPoiNode, OsmRelation, OsmWay, RelationMember,
+    TagMap, is_poi,
 };
 
 /// Shared body of the `Element::Node` and `Element::DenseNode` branches in
@@ -31,7 +32,7 @@ fn process_pbf_node(
     id: i64,
     lat: f64,
     lon: f64,
-    tags: HashMap<String, String>,
+    tags: TagMap,
     nodes: &mut HashMap<i64, OsmNode>,
     poi_nodes: &mut Vec<OsmPoiNode>,
     addr_nodes: &mut Vec<OsmPoiNode>,
@@ -133,14 +134,14 @@ pub fn parse_pbf(path: &Path) -> Result<OsmData> {
     // ways with the same OSM id in the same PBF file do not both end up in the
     // output (which would trip the `OsmData::new` ways/ways_by_id invariant).
     let mut seen_way_ids: HashSet<i64> = HashSet::new();
+    // ENH-008: parse-scoped tag-key interner (one allocation per distinct key
+    // across the whole file instead of one per tag occurrence).
+    let mut interner = KeyInterner::with_common();
 
     reader
         .for_each(|element| match element {
             Element::Node(n) => {
-                let tags: HashMap<String, String> = n
-                    .tags()
-                    .map(|(k, v)| (k.to_string(), v.to_string()))
-                    .collect();
+                let tags: TagMap = interner.intern_tag_pairs(n.tags());
                 process_pbf_node(
                     n.id(),
                     n.lat(),
@@ -158,10 +159,7 @@ pub fn parse_pbf(path: &Path) -> Result<OsmData> {
                 );
             }
             Element::DenseNode(n) => {
-                let tags: HashMap<String, String> = n
-                    .tags()
-                    .map(|(k, v)| (k.to_string(), v.to_string()))
-                    .collect();
+                let tags: TagMap = interner.intern_tag_pairs(n.tags());
                 process_pbf_node(
                     n.id(),
                     n.lat(),
@@ -196,10 +194,7 @@ pub fn parse_pbf(path: &Path) -> Result<OsmData> {
                     log::warn!("skipping duplicate way id {id}");
                     return;
                 }
-                let tags: HashMap<String, String> = w
-                    .tags()
-                    .map(|(k, v)| (k.to_string(), v.to_string()))
-                    .collect();
+                let tags: TagMap = interner.intern_tag_pairs(w.tags());
                 let node_refs: Vec<i64> = w.refs().collect();
                 // QA-103: move both locals — they are not reused after
                 // construction; the previous `tags.clone()` / `node_refs.clone()`
@@ -223,10 +218,7 @@ pub fn parse_pbf(path: &Path) -> Result<OsmData> {
                         log::warn!("skipping relation with missing/invalid id");
                         return;
                     }
-                    let tags: HashMap<String, String> = r
-                        .tags()
-                        .map(|(k, v)| (k.to_string(), v.to_string()))
-                        .collect();
+                    let tags: TagMap = interner.intern_tag_pairs(r.tags());
                     let members: Vec<RelationMember> = r
                         .members()
                         .filter_map(|m| {

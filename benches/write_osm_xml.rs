@@ -31,7 +31,7 @@ fn build_osm_data(node_count: i64, way_count: i64, poi_count: usize) -> OsmData 
     let ways: Vec<OsmWay> = (1..=way_count)
         .map(|w| OsmWay {
             id: w,
-            tags: HashMap::from([("highway".to_string(), "residential".to_string())]),
+            tags: HashMap::from([("highway".into(), "residential".to_string())]),
             node_refs: (0..3)
                 .map(|n| (w - 1) * 3 + 1 + n)
                 .filter(|id| *id <= node_count)
@@ -43,8 +43,8 @@ fn build_osm_data(node_count: i64, way_count: i64, poi_count: usize) -> OsmData 
             lat: 0.5 + (i as f64) * 1e-6,
             lon: 0.5 + (i as f64) * 1e-6,
             tags: HashMap::from([
-                ("amenity".to_string(), "restaurant".to_string()),
-                ("name".to_string(), format!("Place {i}")),
+                ("amenity".into(), "restaurant".to_string()),
+                ("name".into(), format!("Place {i}")),
             ]),
             source: FeatureSource::Osm,
         })

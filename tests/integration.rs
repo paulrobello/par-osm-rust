@@ -69,9 +69,9 @@ fn poi(
     name: &str,
     source: FeatureSource,
 ) -> OsmPoiNode {
-    let mut tags = HashMap::from([(key.to_string(), value.to_string())]);
+    let mut tags = HashMap::from([(key.into(), value.to_string())]);
     if !name.is_empty() {
-        tags.insert("name".to_string(), name.to_string());
+        tags.insert("name".into(), name.to_string());
     }
     OsmPoiNode {
         lat,
@@ -458,12 +458,12 @@ fn clip_to_bbox_keeps_only_ways_touching_the_bbox_and_bounds_nodes() {
         .collect();
     let way_inside = OsmWay {
         id: 1,
-        tags: HashMap::from([("highway".to_string(), "residential".to_string())]),
+        tags: HashMap::from([("highway".into(), "residential".to_string())]),
         node_refs: vec![4 * 11 + 4, 4 * 11 + 6, 6 * 11 + 6],
     };
     let way_outside = OsmWay {
         id: 2,
-        tags: HashMap::from([("landuse".to_string(), "park".to_string())]),
+        tags: HashMap::from([("landuse".into(), "park".to_string())]),
         node_refs: vec![8 * 11 + 8, 8 * 11 + 10, 10 * 11 + 10],
     };
     let mut data = OsmData::default()
@@ -473,7 +473,7 @@ fn clip_to_bbox_keeps_only_ways_touching_the_bbox_and_bounds_nodes() {
         // because its only member way is outside the clip bbox.
         .with_relations(vec![OsmRelation {
             id: 999,
-            tags: HashMap::from([("type".to_string(), "multipolygon".to_string())]),
+            tags: HashMap::from([("type".into(), "multipolygon".to_string())]),
             members: vec![RelationMember {
                 way_id: 2,
                 role: "outer".to_string(),
@@ -575,7 +575,7 @@ fn merge_combines_ways_and_relations_from_both_sources() {
         }])
         .with_relations(vec![OsmRelation {
             id: 1000,
-            tags: HashMap::from([("type".to_string(), "multipolygon".to_string())]),
+            tags: HashMap::from([("type".into(), "multipolygon".to_string())]),
             members: vec![RelationMember {
                 way_id: 100,
                 role: "outer".to_string(),
@@ -591,7 +591,7 @@ fn merge_combines_ways_and_relations_from_both_sources() {
         }])
         .with_relations(vec![OsmRelation {
             id: 2000,
-            tags: HashMap::from([("type".to_string(), "multipolygon".to_string())]),
+            tags: HashMap::from([("type".into(), "multipolygon".to_string())]),
             members: vec![RelationMember {
                 way_id: 200,
                 role: "outer".to_string(),

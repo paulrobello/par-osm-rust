@@ -32,6 +32,25 @@ Released versions are published to [crates.io](https://crates.io/crates/par-osm-
 
 ### Changed
 
+- **Tag maps now key by interned `Arc<str>` (ENH-008, breaking — targets
+  0.5.0).** Every `tags` field (`OsmWay`, `OsmRelation`, `OsmPoiNode`) now
+  uses the new `TagMap = HashMap<Arc<str>, String>` alias instead of
+  `HashMap<String, String>`, and the XML, PBF, and Overture parsers feed tag
+  keys through a parse-scoped `KeyInterner` so each distinct key allocates
+  once per parse instead of once per occurrence. On a representative 60k-node
+  / 20k-way extract (8 tags/way from the hot vocabulary) this cuts parse
+  allocations 16.7% (960,055 → 800,090 ops) and requested bytes 8.4%
+  (64.2 → 56.1 MiB) with no wall-time change (0.049 s); the win scales with
+  dataset size, so planet-scale extracts see the largest cut. Tag values
+  stay `String` (they are mostly unique). The measurement gate
+  (`tests/alloc_profile.rs`, `#[ignore]`'d) recorded the baseline before any
+  interning code was written. **Migration:** reads are source-compatible —
+  `tags.get("name")`, `tags["name"]`, `for (k, v) in &tags`, and
+  `assert_eq!(a.tags, b.tags)` compile unchanged because `Arc<str>: Borrow<str>`
+  and `Arc<str>: PartialEq`. Only construction changes: replace tag-key
+  `"key".to_string()` with `"key".into()` (or `Arc::from("key")`), and any
+  `&String` key binding becomes `&Arc<str>` (deref via `.as_str()` or `&**k`).
+
 - **`fetch_osm_data` now streams the Overpass response (ENH-004).** The
   response body is no longer buffered into an in-memory `String` before
   parsing. It is streamed straight into a cache-directory temp file bounded by

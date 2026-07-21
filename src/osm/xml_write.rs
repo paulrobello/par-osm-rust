@@ -3,13 +3,13 @@
 //! Exposes [`write_osm_xml_string`], which turns an [`OsmData`] back into the
 //! simple OSM XML dialect this crate and `osm-world` can re-parse.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::synthetic_ids::{
     SYNTHETIC_NODE_ID_BASE, next_writer_node_id, writer_relation_id, writer_way_id,
 };
 
-use super::model::OsmData;
+use super::model::{OsmData, TagMap};
 
 fn escape_xml_attr(value: &str) -> String {
     // QA-114: single-pass escape into one pre-sized `String`. The prior
@@ -34,7 +34,7 @@ fn escape_xml_attr(value: &str) -> String {
     out
 }
 
-fn write_tags(xml: &mut String, tags: &HashMap<String, String>) {
+fn write_tags(xml: &mut String, tags: &TagMap) {
     let mut entries: Vec<_> = tags.iter().collect();
     entries.sort_by_key(|(key, _)| *key);
     for (key, value) in entries {

@@ -34,12 +34,15 @@ mod pbf;
 mod xml_parse;
 mod xml_write;
 
-pub use model::{FeatureSource, OsmData, OsmNode, OsmPoiNode, OsmRelation, OsmWay, RelationMember};
+pub use model::{
+    FeatureSource, OsmData, OsmNode, OsmPoiNode, OsmRelation, OsmWay, RelationMember, TagKey,
+    TagMap,
+};
 pub use pbf::parse_pbf;
 pub use xml_parse::{parse_osm_file, parse_osm_xml, parse_osm_xml_file, parse_osm_xml_str};
 pub use xml_write::write_osm_xml_string;
 
-pub(crate) use model::POI_TAG_RULES;
+pub(crate) use model::{KeyInterner, POI_TAG_RULES};
 
 #[cfg(test)]
 // ARC-109 (0.3.0): the lib's own tests exercise the deprecated `OsmData::new`
@@ -351,8 +354,8 @@ mod tests {
                 lat: 51.55,
                 lon: -0.05,
                 tags: HashMap::from([
-                    ("amenity".to_string(), "restaurant".to_string()),
-                    ("name".to_string(), "A&B Cafe".to_string()),
+                    ("amenity".into(), "restaurant".to_string()),
+                    ("name".into(), "A&B Cafe".to_string()),
                 ]),
                 source: FeatureSource::Overture,
             }],
@@ -379,7 +382,7 @@ mod tests {
             vec![OsmPoiNode {
                 lat: 51.55,
                 lon: -0.05,
-                tags: HashMap::from([("shop".to_string(), "bakery".to_string())]),
+                tags: HashMap::from([("shop".into(), "bakery".to_string())]),
                 source: FeatureSource::Overture,
             }],
             Vec::new(),
@@ -406,20 +409,20 @@ mod tests {
             vec![
                 OsmWay {
                     id: 100,
-                    tags: HashMap::from([("landuse".to_string(), "park".to_string())]),
+                    tags: HashMap::from([("landuse".into(), "park".to_string())]),
                     node_refs: vec![1, 2],
                 },
                 OsmWay {
                     id: 101,
-                    tags: HashMap::from([("natural".to_string(), "water".to_string())]),
+                    tags: HashMap::from([("natural".into(), "water".to_string())]),
                     node_refs: vec![2, 1],
                 },
             ],
             vec![OsmRelation {
                 id: 500,
                 tags: HashMap::from([
-                    ("type".to_string(), "multipolygon".to_string()),
-                    ("name".to_string(), "A&B Park".to_string()),
+                    ("type".into(), "multipolygon".to_string()),
+                    ("name".into(), "A&B Park".to_string()),
                 ]),
                 members: vec![
                     RelationMember {
@@ -466,7 +469,7 @@ mod tests {
             vec![OsmPoiNode {
                 lat: 1.0,
                 lon: 1.0,
-                tags: HashMap::from([("amenity".to_string(), "cafe".to_string())]),
+                tags: HashMap::from([("amenity".into(), "cafe".to_string())]),
                 source: FeatureSource::Overture,
             }],
             Vec::new(),
@@ -629,7 +632,7 @@ mod tests {
             HashMap::from([(node_id, OsmNode { lat, lon })]),
             vec![OsmWay {
                 id: way_id,
-                tags: HashMap::from([("name".to_string(), format!("way-{way_id}"))]),
+                tags: HashMap::from([("name".into(), format!("way-{way_id}"))]),
                 node_refs: vec![node_id],
             }],
             Vec::new(),
@@ -1013,16 +1016,16 @@ mod tests {
             vec![OsmWay {
                 id: 10,
                 tags: HashMap::from([
-                    ("highway".to_string(), "residential".to_string()),
-                    ("name".to_string(), "Test Street".to_string()),
+                    ("highway".into(), "residential".to_string()),
+                    ("name".into(), "Test Street".to_string()),
                 ]),
                 node_refs: vec![1, 2, 3],
             }],
             vec![OsmRelation {
                 id: 200,
                 tags: HashMap::from([
-                    ("type".to_string(), "multipolygon".to_string()),
-                    ("landuse".to_string(), "park".to_string()),
+                    ("type".into(), "multipolygon".to_string()),
+                    ("landuse".into(), "park".to_string()),
                 ]),
                 members: vec![RelationMember {
                     way_id: 10,
@@ -1033,7 +1036,7 @@ mod tests {
             vec![OsmPoiNode {
                 lat: 51.505,
                 lon: -0.095,
-                tags: HashMap::from([("amenity".to_string(), "cafe".to_string())]),
+                tags: HashMap::from([("amenity".into(), "cafe".to_string())]),
                 source: FeatureSource::Osm,
             }],
             Vec::new(),
