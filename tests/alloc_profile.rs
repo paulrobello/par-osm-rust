@@ -170,8 +170,8 @@ fn measure_key_allocation_share() {
     println!("--------------------------------------------------------");
     println!("total alloc ops    : {total_ops:>14} (allocs {allocs} + reallocs {reallocs})");
     println!("total bytes        : {bytes:>14} ({bytes_mib:.1} MiB requested)");
-    println!("tag key allocs     : {n_tags:>14}  (= #tags; each key is one String)");
-    println!("tag key bytes      : {key_bytes:>14}");
+    println!("tag entries        : {n_tags:>14}  (constant across the change)");
+    println!("tag key bytes      : {key_bytes:>14}  (sum of key lens over entries)");
     println!("--------------------------------------------------------");
     println!(
         "KEY SHARE by count : {:>6.2}%  ({} / {})",
