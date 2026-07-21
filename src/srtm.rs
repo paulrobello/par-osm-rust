@@ -392,9 +392,14 @@ pub fn download_tiles_for_bbox(
         for ev in rx {
             match ev {
                 TileEvent::Started(i, name) => {
-                    let fraction = i as f32 / total as f32;
+                    // Parallel workers emit Started events in nondeterministic index
+                    // order; clamp the fraction to the monotonic cursor so the progress
+                    // bar never regresses, but always notify — emit_progress would
+                    // otherwise drop an out-of-order start (and its tile message).
+                    let fraction = (i as f32 / total as f32).max(last_progress);
+                    last_progress = fraction;
                     let message = format!("SRTM tile {name} ({}/{total})", i + 1);
-                    crate::emit_progress(progress_cb, &mut last_progress, fraction, &message);
+                    progress_cb(fraction, &message);
                 }
                 TileEvent::Done(_name, Ok(true)) => {
                     downloaded += 1;
