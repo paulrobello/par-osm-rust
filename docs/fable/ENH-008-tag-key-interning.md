@@ -1,6 +1,6 @@
 # ENH-008 — Tag-Storage Allocation Reduction (Key Interning)
 
-> Status: proposed · Effort: High · Impact: per-tag allocation eliminated for hot keys; lower RSS on large extracts
+> Status: done (0.5.0, 2026-07-20) · Effort: High · Impact: per-tag allocation eliminated for hot keys; lower RSS on large extracts
 > **Gated twice**: (1) it changes the public type of every `tags` field → 0.3.0-class,
 > sequence inside/after ENH-007; (2) it must be justified by measurement first —
 > implement ENH-006 (bench harness) and run the baseline profile below BEFORE writing

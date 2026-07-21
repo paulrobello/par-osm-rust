@@ -1,6 +1,6 @@
 # ENH-004 — Streaming Overpass Fetch→Parse Pipeline
 
-> Status: proposed · Effort: Medium (~1 day) · Impact: ~50% peak-memory cut on large fetches
+> Status: done (0.5.0, 2026-07-20) · Effort: Medium (~1 day) · Impact: ~50% peak-memory cut on large fetches
 > **Hard prerequisite**: QA-102 (unified `BufRead` parse engine). Sequence after SEC-109
 > (response cap) — this plan absorbs that cap into the streaming copy.
 

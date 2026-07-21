@@ -9,6 +9,8 @@ Released versions are published to [crates.io](https://crates.io/crates/par-osm-
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-20
+
 ### Added
 
 - **Streaming cache primitives on `RawCache` (ENH-004).** The generic
@@ -74,6 +76,19 @@ Released versions are published to [crates.io](https://crates.io/crates/par-osm-
   Behavior is byte-identical (pinned by the existing theme tests plus five new
   table-coverage tests). Pure internal refactor — no public API change, no
   behavior change.
+
+This release ships four enhancements landed since 0.4.0. **ENH-008 is breaking
+under SemVer** — every `tags` field now keys by `Arc<str>` (`TagMap =
+HashMap<Arc<str>, String>`) — which is why the version moves to **0.5.0**
+rather than 0.4.1. Reads stay source-compatible (`Arc<str>: Borrow<str>`), so
+only tag-key *construction* changes (`"key".to_string()` → `"key".into()`); see
+the ENH-008 entry above for the full migration. The other three are
+non-breaking: **ENH-004** streams the Overpass fetch into a bounded cache temp
+file (~50% peak-memory cut on large fetches), **ENH-005** refactors the Overture
+tag mapper into a declarative rule table (internal, byte-identical behavior),
+and **ENH-006** adds informational criterion bench-regression tracking in CI.
+Downstream crates (`osm-to-bedrock`, `osm-world`) need the ENH-008 tag-key
+construction migration; no code changes are required for ENH-004/005/006.
 
 ## [0.4.0] - 2026-07-19
 
@@ -514,7 +529,8 @@ OSM XML/PBF parsing, normalized `OsmData` interchange, SRTM tile download, HGT
 elevation sampling, atomic write-then-rename cache discipline, and the
 `sources::fetch_map_data` orchestration entry point.
 
-[Unreleased]: https://github.com/paulrobello/par-osm-rust/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/paulrobello/par-osm-rust/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/paulrobello/par-osm-rust/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/paulrobello/par-osm-rust/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/paulrobello/par-osm-rust/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/paulrobello/par-osm-rust/compare/v0.2.1...v0.3.0

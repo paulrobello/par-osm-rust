@@ -1,6 +1,6 @@
 # ENH-006 — Criterion Benchmark Regression Tracking in CI
 
-> Status: proposed · Effort: Medium (~1 day incl. tuning) · Impact: perf regressions surface at PR time
+> Status: done (0.5.0, 2026-07-20) · Effort: Medium (~1 day incl. tuning) · Impact: perf regressions surface at PR time
 > **CI change — maintainer review required before merging (repo policy: CI/security
 > changes are opt-in).** Independent of audit phases.
 

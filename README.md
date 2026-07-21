@@ -23,7 +23,7 @@ par-osm-rust = { path = "../par-osm-rust" }
 Consumers that want only the pure subset (data model, parsing, writing, cache I/O, filter, synthetic IDs, elevation) without the blocking `reqwest` fetch surface can disable default features:
 
 ```toml
-par-osm-rust = { version = "0.4", default-features = false }
+par-osm-rust = { version = "0.5", default-features = false }
 ```
 
 ## Contents

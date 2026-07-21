@@ -1,6 +1,6 @@
 # ENH-005 — Table-Driven `map_tags_for_theme`
 
-> Status: proposed · Effort: Low-Medium (~half day) · Impact: cyclomatic 26 → <10 per unit; Overture schema changes become table edits
+> Status: done (0.5.0, 2026-07-20) · Effort: Low-Medium (~half day) · Impact: cyclomatic 26 → <10 per unit; Overture schema changes become table edits
 > Independent of the audit phases (touches only `src/overture/theme.rs`); behavior is
 > pinned by existing theme tests. Do after ARC-101 lands to avoid same-module churn.
 
