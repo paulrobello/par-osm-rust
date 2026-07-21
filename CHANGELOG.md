@@ -21,6 +21,15 @@ Released versions are published to [crates.io](https://crates.io/crates/par-osm-
   hands the surviving temp file back on a commit failure). All additive; no
   existing signature changed.
 
+- **Criterion benchmark regression tracking in CI (ENH-006).** A new
+  `.github/workflows/bench.yml` runs the three criterion benches
+  (`parse_osm_xml`, `write_osm_xml`, `merge_source_data`) on every pull request,
+  building and benching both the base and head commits on a single runner and
+  posting a `critcmp` base→head comparison — plus a >10%-change highlight — to
+  the run summary. The job is informational only and is not meant as a required
+  status check, since GitHub-hosted-runner noise (commonly ±5–10%) makes hard
+  perf gating counterproductive. No library code or public API is touched.
+
 ### Changed
 
 - **`fetch_osm_data` now streams the Overpass response (ENH-004).** The

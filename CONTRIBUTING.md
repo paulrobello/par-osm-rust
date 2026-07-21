@@ -217,6 +217,26 @@ the call sites that miss them (notably `.pbf` fixture coverage for
 `parse_pbf`, and broader parser-equivalence fixtures); contributions that
 close those gaps are welcome.
 
+### Benchmarks in CI
+
+The three criterion benches (`parse_osm_xml`, `write_osm_xml`,
+`merge_source_data`) also run automatically on every pull request against
+`main`, via `.github/workflows/bench.yml`. The job builds and benches both the
+PR's base and head commits on a single runner, saves each as a named criterion
+baseline, and posts a `critcmp base head` comparison (plus a >10%-change
+highlight) to the run's job summary. It is **informational only** — it is not a
+required status check, because GitHub-hosted-runner noise (commonly ±5–10%)
+makes hard perf gating counterproductive. Read the ratio between base and head,
+not the absolute timings. The local equivalent of the CI comparison is:
+
+```sh
+cargo bench -- --save-baseline main   # baseline before your changes
+# ...make your changes...
+cargo bench -- --save-baseline new
+critcmp main new                       # side-by-side comparison table
+critcmp main new -t 10                 # show only changes greater than 10%
+```
+
 ## Walkthrough: Adding a New OvertureTheme Variant
 
 This walkthrough enumerates every spot that must change when adding a new

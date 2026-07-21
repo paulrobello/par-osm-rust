@@ -1,0 +1,96 @@
+name: Bench
+
+# ENH-006 — informational benchmark-regression tracking for the three criterion
+# benches (parse_osm_xml, write_osm_xml, merge_source_data). On every PR against
+# main this job builds and benches BOTH the base and head commits on a single
+# runner (so per-runner variance cancels), saves each run as a named criterion
+# baseline, and posts a `critcmp base head` comparison plus a >10%-change
+# highlight to the job summary.
+#
+# INFORMATIONAL ONLY. GitHub-hosted-runner noise is commonly ±5–10%, which makes
+# hard perf gating counterproductive. Do NOT add `bench` / `bench-compare` to the
+# repository's required status checks — the signal is the posted comparison, not
+# a green check. The compare/threshold steps are best-effort (continue-on-error +
+# if: always) so a critcmp hiccup still leaves a useful summary.
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bench-compare:
+    name: Bench regression check (informational)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # Need both the base and head commits in-tree for the in-job checkouts.
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
+        with:
+          tool: critcmp
+
+      # Shortened criterion windows keep the three benches to a few minutes.
+      # Absolute timings are noisy on shared runners; only the base→head RATIO
+      # (same runner, same windows) is meaningful here. SHAs come in via env to
+      # keep them out of the shell (actionlint script-injection hygiene).
+      - name: Bench base commit
+        env:
+          SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git checkout -q "$SHA"
+          cargo bench --bench parse_osm_xml --bench write_osm_xml --bench merge_source_data \
+            -- --save-baseline base --warm-up-time 1 --measurement-time 3
+      - name: Bench head commit
+        env:
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git checkout -q "$SHA"
+          cargo bench --bench parse_osm_xml --bench write_osm_xml --bench merge_source_data \
+            -- --save-baseline head --warm-up-time 1 --measurement-time 3
+
+      # `critcmp base head` prints a per-benchmark table comparing the two saved
+      # baselines. Both baselines are produced by the same criterion 0.5 (this
+      # crate pins criterion = "0.5"), so the cross-version format mismatch
+      # critcmp's README warns about does not apply.
+      - name: Post base→head comparison to summary
+        if: always()
+        continue-on-error: true
+        run: |
+          {
+            echo '## Bench comparison (base → head)'
+            echo ''
+            echo 'Informational. Read the ratio between base and head, not the'
+            echo 'absolute times — GitHub-hosted-runner noise is commonly ±5–10%.'
+            echo ''
+            echo '```'
+            critcmp base head || echo '(critcmp could not produce a comparison)'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # critcmp's `-t 10` hides differences of 10% or less, so anything still
+      # printed below is a >10% change (regression or improvement). Never fails
+      # the job.
+      - name: Flag changes over 10%
+        if: always()
+        continue-on-error: true
+        run: |
+          {
+            echo '## Changes over 10% (base → head)'
+            echo ''
+            echo '```'
+            critcmp base head -t 10 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0

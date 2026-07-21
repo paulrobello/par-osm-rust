@@ -25,25 +25,9 @@
 
 | # | ID | Title | Impact | Effort | Status |
 | --- | ---- | ------- | -------- | -------- | -------- |
-| 1 | ENH-006 | Criterion benchmark regression tracking in CI | Medium (guardrail) | Medium | [ ] |
-| 2 | ENH-008 | Tag-storage allocation reduction (key interning) | Medium (perf/memory) | High | [ ] |
+| 1 | ENH-008 | Tag-storage allocation reduction (key interning) | Medium (perf/memory) | High | [ ] |
 
 ---
-
-## ENH-006 — Criterion benchmark regression tracking in CI
-
-The three criterion benches (parse/write/merge) exist precisely to protect hot paths,
-but they only run when a developer remembers to run them and eyeball the delta — the
-remediation playbook's "baseline first, compare after" discipline is manual. Adding a
-CI job that runs the benches on PRs and compares against the base branch (via
-`critcmp` on criterion's saved baselines, or `cargo-codspeed`/`bencher` if a service
-is acceptable) turns silent performance regressions into review comments. Runner noise
-is the known hazard: the plan uses relative thresholds (~10%) and marks the job
-non-required/informational.
-
-**Expected impact**: performance regressions caught at PR time instead of by users.
-**Effort**: Medium — a day of CI plumbing + threshold tuning. **CI change — maintainer
-review per repo policy.** **Plan**: `docs/fable/ENH-006-ci-bench-regression-tracking.md`
 
 ## ENH-008 — Tag-storage allocation reduction (key interning)
 
